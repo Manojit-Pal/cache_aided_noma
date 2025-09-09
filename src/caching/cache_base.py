@@ -6,6 +6,13 @@ class CacheBase(ABC):
     def __init__(self, capacity: int):
         self.capacity = capacity
 
+    def __contains__(self, item: int) -> bool:
+        return self.is_hit(item)
+    
+    def stats(self):
+        return {"capacity": self.capacity, "size": len(getattr(self, "store", []))}
+
+
     @abstractmethod
     def populate(self, items: Iterable[int]):
         """Populate cache with items (called in placement phase)."""

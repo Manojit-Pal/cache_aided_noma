@@ -21,7 +21,25 @@ REQUESTS_PER_USER = 50  # number of requests per user (enough to get stable stat
 CACHE_SIZE = 200        # ~10% of catalog size, realistic for small edge server / base station cache
 
 # Caching policy options: "topk", "lru", "lfu", "random"
-CACHE_POLICY = "topk"
+CACHE_POLICY = "noma_aware"  # Options: "noma_aware", "joint_opt", "multi_obj", "rl"
+
+
+# ------------------------------
+# Novel algorithm parameters
+# ------------------------------
+NOMA_AWARE_ALPHA_POP = 0.3      # Popularity learning rate
+NOMA_AWARE_ALPHA_CHANNEL = 0.2  # Channel learning rate
+CACHE_UPDATE_INTERVAL = 100      # How often to re-optimize cache
+TIME_SLOTS = 1000               # Simulation time slots for learning
+
+# ------------------------------
+# Multi-objective weights
+# ------------------------------
+MO_OBJECTIVES = ['hit_rate', 'outage', 'energy']
+MO_HIT_WEIGHT = 0.4
+MO_OUTAGE_WEIGHT = 0.4  
+MO_ENERGY_WEIGHT = 0.2
+
 
 # ------------------------------
 # Monte Carlo runs

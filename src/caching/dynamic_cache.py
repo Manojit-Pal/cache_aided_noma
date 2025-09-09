@@ -1,73 +1,85 @@
 # src/caching/dynamic_cache.py
 import random
 from collections import OrderedDict, Counter
-
-class BaseCache:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.store = set()
-        self.hits = 0
-        self.requests = 0
-
-    def __contains__(self, item):
-        """Allow using `if item in cache` for membership check only (no stats)."""
-        return item in self.store
-
-    def is_hit(self, item):
-        """Check + update hit statistics (used internally)."""
-        self.requests += 1
-        if item in self.store:
-            self.hits += 1
-            return True
-        return False
-
-    def hit_rate(self):
-        return self.hits / self.requests if self.requests > 0 else 0
+from .cache_base import CacheBase
 
 
-class LRUCache(BaseCache):
-    def __init__(self, capacity):
+class LRUCache(CacheBase):
+    def __init__(self, capacity: int):
         super().__init__(capacity)
         self.cache = OrderedDict()
 
-    def request(self, item):
-        """Insert/update item into cache (after miss)."""
+    def populate(self, items=None):
+        self.cache.clear()
+        if items:
+            for it in items[:self.capacity]:
+                self.cache[it] = True
+
+    def is_hit(self, item: int) -> bool:
         if item in self.cache:
-            self.cache.move_to_end(item)  # mark as recently used
+            self.cache.move_to_end(item)  # refresh recency
+            return True
         else:
             if len(self.cache) >= self.capacity:
-                self.cache.popitem(last=False)  # remove least recently used
+                self.cache.popitem(last=False)
             self.cache[item] = True
-            self.store = set(self.cache.keys())
+            return False
+
+    def clear(self):
+        self.cache.clear()
 
 
-class LFUCache(BaseCache):
-    def __init__(self, capacity):
+class LFUCache(CacheBase):
+    def __init__(self, capacity: int):
         super().__init__(capacity)
+        self.store = set()
         self.counter = Counter()
 
-    def request(self, item):
-        """Insert/update item into cache (after miss)."""
+    def populate(self, items=None):
+        self.store.clear()
+        self.counter.clear()
+        if items:
+            for it in items[:self.capacity]:
+                self.store.add(it)
+                self.counter[it] = 1
+
+    def is_hit(self, item: int) -> bool:
         if item in self.store:
             self.counter[item] += 1
+            return True
         else:
             if len(self.store) >= self.capacity:
-                # evict least frequently used
                 lfu_item, _ = min(self.counter.items(), key=lambda x: x[1])
                 self.store.remove(lfu_item)
                 del self.counter[lfu_item]
             self.store.add(item)
             self.counter[item] = 1
+            return False
+
+    def clear(self):
+        self.store.clear()
+        self.counter.clear()
 
 
-class RandomCache(BaseCache):
-    def __init__(self, capacity):
+class RandomCache(CacheBase):
+    def __init__(self, capacity: int):
         super().__init__(capacity)
+        self.store = set()
 
-    def request(self, item):
-        """Insert item into cache (after miss)."""
-        if item not in self.store:
+    def populate(self, items=None):
+        self.store.clear()
+        if items:
+            for it in items[:self.capacity]:
+                self.store.add(it)
+
+    def is_hit(self, item: int) -> bool:
+        if item in self.store:
+            return True
+        else:
             if len(self.store) >= self.capacity:
                 self.store.remove(random.choice(list(self.store)))
             self.store.add(item)
+            return False
 
+    def clear(self):
+        self.store.clear()
