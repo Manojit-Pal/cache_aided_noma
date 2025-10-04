@@ -23,6 +23,9 @@ CACHE_SIZE = 200        # ~10% of catalog size, realistic for small edge server 
 # Caching policy options: "topk", "lru", "lfu", "random"
 CACHE_POLICY = "noma_aware"  # Options: "noma_aware", "joint_opt", "multi_obj", "rl"
 
+# Effective rate when served from local cache (bits/s/Hz) — models very fast local delivery
+CACHE_DELIVERY_RATE = 10.0
+
 
 # ------------------------------
 # Novel algorithm parameters
