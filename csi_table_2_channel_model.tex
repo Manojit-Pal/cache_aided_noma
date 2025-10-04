@@ -1,0 +1,24 @@
+\begin{table}[h]
+\centering
+\caption{Channel Model Specifications}
+\label{tab:channel_model}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Component} & \textbf{Model/Description} \\
+\hline
+Large-Scale Fading & Path loss: $PL(d) = d^{-\gamma}$, $\gamma = 3.5$ \\
+Small-Scale Fading & Rayleigh: $|h|^2 \sim \text{Exp}(1)$ \\
+User Distribution & Uniform in circle, radius 500.0 m \\
+Channel Gain & $g = PL(d) \times |h|^2$ \\
+\hline
+Weak User Gain & $g_w = \min\{g_1, g_2\}$ \\
+Strong User Gain & $g_s = \max\{g_1, g_2\}$ \\
+\hline
+SINR (Weak User) & $\gamma_w = \frac{P_t p_w g_w}{P_t p_s g_w + N_0}$ \\
+SINR (Strong User) & $\gamma_s = \frac{P_t p_s g_s}{N_0 + \zeta P_t p_w g_s}$ \\
+\hline
+Achievable Rate & $R = \log_2(1 + \gamma)$ bps/Hz \\
+BER (BPSK) & $P_e = \frac{1}{2}\text{erfc}(\sqrt{\gamma})$ \\
+\hline
+\end{tabular}
+\end{table}

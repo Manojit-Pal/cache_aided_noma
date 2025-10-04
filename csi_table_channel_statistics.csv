@@ -1,0 +1,5 @@
+Metric,Mean,Std Dev,Min,Max,Median
+Distance (m),331.63,116.92,8.69,499.89,351.75
+Path Loss,6.81e-07,1.62e-05,3.58e-10,5.16e-04,1.23e-09
+Channel Gain (|h|²),4.60e-07,1.06e-05,3.78e-13,3.84e-04,9.77e-10
+Channel Gain (dB),-63.37,-49.75,-124.22,-34.16,-90.10

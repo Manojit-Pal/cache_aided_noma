@@ -1,0 +1,18 @@
+Parameter,Value,Description
+Number of Users,200,Total users in cell
+Number of Files,2000,Content library size
+Cache Size,200,Cache storage capacity
+Cache Capacity Ratio,10.0%,Percentage of catalog cached
+Zipf Exponent (α),1.0,Content popularity skew
+Requests per User,50,Requests generated per user
+Total Requests,10000,Total simulation requests
+Transmit Power,1.0 W,Base station transmit power
+Noise Power,1.00e-09 W,Additive white Gaussian noise
+Cell Radius,500.0 m,Cell coverage radius
+Path Loss Exponent,3.5,Urban/suburban environment
+Target Rate,0.5 bits/s/Hz,QoS requirement per user
+Power Allocation (Weak),0.8,Power fraction to weak user
+Power Allocation (Strong),0.2,Power fraction to strong user
+SIC Imperfection Factor,0.05,Residual interference factor
+SNR Range,-10 to 28 dB,Signal-to-noise ratio sweep
+Monte Carlo Runs,50,Statistical replications

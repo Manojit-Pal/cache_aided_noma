@@ -1,0 +1,30 @@
+\begin{table}[h]
+\centering
+\caption{Cache-Aided NOMA Operations}
+\label{tab:cache_ops}
+\begin{tabular}{|l|p{8cm}|}
+\hline
+\textbf{Phase} & \textbf{Operation} \\
+\hline
+\textbf{Placement Phase} & \\
+Content Popularity & Model as Zipf distribution: $p_i \propto i^{-\alpha}$ \\
+Cache Strategy & Store top-$C$ most popular files \\
+Cache Size & $C = 200$ files (10.0\% of catalog) \\
+\hline
+\textbf{Delivery Phase} & \\
+Request Generation & Users request files according to Zipf \\
+Cache Hit & File served locally at rate $R_{cache}$ \\
+            & No wireless transmission needed \\
+            & Outage probability = 0, BER = 0 \\
+\hline
+Cache Miss & File transmitted via NOMA \\
+           & Subject to channel conditions \\
+           & Outage probability $> 0$, BER $> 0$ \\
+\hline
+\textbf{Performance Metrics} & \\
+Sum-Rate & $R_{sum} = R_w + R_s$ (per-request basis) \\
+Outage Prob. & $P_{out} = P(R < R_{target})$ \\
+BER & $P_e = \frac{1}{2}\text{erfc}(\sqrt{\gamma})$ for BPSK \\
+\hline
+\end{tabular}
+\end{table}

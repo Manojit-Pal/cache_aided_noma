@@ -1,0 +1,6 @@
+Scenario,Weak User Distance (m),Strong User Distance (m),Weak User Gain,Strong User Gain,Weak User Gain (dB),Strong User Gain (dB),Gain Ratio (Strong/Weak)
+1,471.1,184.0,1.31e-10,5.81e-09,-98.8,-82.4,44.3
+2,405.4,350.9,4.53e-10,1.99e-09,-93.4,-87.0,4.4
+3,438.6,102.1,1.38e-09,8.77e-08,-88.6,-70.6,63.5
+4,249.3,273.9,5.38e-10,1.86e-09,-92.7,-87.3,3.5
+5,486.3,478.5,5.81e-12,7.01e-11,-112.4,-101.5,12.1

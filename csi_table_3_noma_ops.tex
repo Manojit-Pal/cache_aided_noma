@@ -1,0 +1,26 @@
+\begin{table}[h]
+\centering
+\caption{NOMA Transmission Operations}
+\label{tab:noma_ops}
+\begin{tabular}{|l|p{8cm}|}
+\hline
+\textbf{Operation} & \textbf{Description} \\
+\hline
+User Pairing & Pair weak user (low $g_w$) with strong user (high $g_s$) \\
+            & Strategy: Extreme pairing (weakest $\leftrightarrow$ strongest) \\
+\hline
+Power Allocation & Grid search over $p_w \in [0,1]$, $p_s = 1 - p_w$ \\
+                & Maximize users satisfying $R \geq R_{target}$ \\
+                & Weak user gets higher power: $p_w = 0.8$ \\
+\hline
+Weak User Decoding & Direct decoding of own signal \\
+                   & Treats strong user as interference \\
+                   & SINR: $\gamma_w = \frac{P_t p_w g_w}{P_t p_s g_w + N_0}$ \\
+\hline
+Strong User SIC & 1. Decode weak user signal first \\
+                & 2. Subtract (imperfect, factor $\zeta$) \\
+                & 3. Decode own signal \\
+                & SINR: $\gamma_s = \frac{P_t p_s g_s}{N_0 + \zeta P_t p_w g_s}$ \\
+\hline
+\end{tabular}
+\end{table}

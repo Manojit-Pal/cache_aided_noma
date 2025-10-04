@@ -1,0 +1,29 @@
+\begin{table}[h]
+\centering
+\caption{System Parameters and Simulation Configuration}
+\label{tab:system_params}
+\begin{tabular}{|l|c|l|}
+\hline
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\hline
+Number of Users ($N_u$) & 200 & Total users in cell \\
+Number of Files ($N_f$) & 2000 & Content library size \\
+Cache Size ($C$) & 200 & Cache storage capacity \\
+Cache Ratio & 10.0\% & Percentage of catalog cached \\
+Zipf Exponent ($\alpha$) & 1.0 & Content popularity skew \\
+\hline
+Transmit Power ($P_t$) & 1.0 W & Base station Tx power \\
+Noise Power ($N_0$) & 1.00e-09 W & AWGN power \\
+Cell Radius ($R$) & 500.0 m & Cell coverage radius \\
+Path Loss Exponent ($\gamma$) & 3.5 & Urban/suburban model \\
+\hline
+Target Rate ($R_{target}$) & 0.5 bps/Hz & QoS requirement \\
+Power Coeff. Weak ($p_w$) & 0.8 & Power to weak user \\
+Power Coeff. Strong ($p_s$) & 0.2 & Power to strong user \\
+SIC Imperfection ($\zeta$) & 0.05 & Residual interference \\
+\hline
+SNR Range & -10 to 28 dB & Signal-to-noise sweep \\
+Monte Carlo Runs & 50 & Statistical replications \\
+\hline
+\end{tabular}
+\end{table}
