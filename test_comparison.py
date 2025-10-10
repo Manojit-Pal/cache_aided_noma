@@ -38,9 +38,9 @@ def quick_test():
     
     for idx in range(len(df_cache)):
         snr = df_cache['snr_db'].iloc[idx]
-        sum_cache = df_cache['avg_sum_rate'].iloc[idx]
-        sum_no_cache = df_no_cache['avg_sum_rate'].iloc[idx]
-        gain = (sum_cache - sum_no_cache) / sum_no_cache * 100
+        sum_cache = df_cache['avg_sum_rate_per_request'].iloc[idx]
+        sum_no_cache = df_no_cache['avg_sum_rate_per_request'].iloc[idx]
+        gain = (sum_cache - sum_no_cache) / (sum_no_cache + 1e-12) * 100
         
         print(f"\nSNR = {snr} dB:")
         print(f"  Sum-Rate (Cache):      {sum_cache:.3f} bps/Hz")

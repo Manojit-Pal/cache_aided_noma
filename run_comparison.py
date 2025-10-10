@@ -24,4 +24,5 @@ if __name__ == "__main__":
     print("\n💾 Check the generated CSV files:")
     print("   1. results_cache_aided_noma.csv")
     print("   2. results_traditional_noma.csv")
-    print("\nShow these results to your teacher! 🎓\n")
+
+    
