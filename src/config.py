@@ -74,3 +74,115 @@ TARGET_RATE_BPS = 0.5        # target rate in bits/s/Hz per user
 # Power allocation method
 POWER_ALLOC_GRID = 101       # grid-search resolution for allocation
 USE_CLOSED_FORM_ALLOC = False # keep False → grid-search is more general
+
+# ========== NEW: RL-SPECIFIC PARAMETERS ==========
+
+# Training configuration
+RL_TRAINING_STEPS = 50000  # ⚠️ INCREASED from 1000
+RL_TRAINING_EPISODES = 10  # Number of full training episodes
+RL_STEPS_PER_EPISODE = 1000
+
+# Evaluation configuration  
+RL_EVAL_REQUESTS = 5000  # Requests for evaluation phase
+RL_SEPARATE_TRAIN_EVAL = True  # Use separate training/evaluation
+
+# Neural network configuration
+RL_USE_NEURAL_NETWORK = True  # Try to use PyTorch DQN (fallback to Q-table)
+RL_HIDDEN_DIMS = [128, 64]  # Hidden layer dimensions
+RL_LEARNING_RATE = 0.001
+RL_BATCH_SIZE = 64
+RL_REPLAY_BUFFER_SIZE = 50000  # ⚠️ INCREASED from 2000
+
+# Exploration configuration
+RL_EPSILON_START = 1.0  # Start with full exploration
+RL_EPSILON_END = 0.01  # End with 1% exploration
+RL_EPSILON_DECAY_STEPS = 25000  # Decay over 5000 steps
+RL_EVAL_EPSILON = 0.05  # Low exploration during evaluation
+
+# Q-learning parameters
+RL_GAMMA = 0.95  # Discount factor
+RL_TARGET_UPDATE_FREQ = 100  # Update target network every 100 steps
+RL_TRAIN_FREQUENCY = 4  # Train every 4 steps
+
+# Reward function parameters
+RL_REWARD_CACHE_HIT = 10.0
+RL_REWARD_CACHE_MISS_SUCCESS = -1.0
+RL_REWARD_OUTAGE = -10.0
+RL_REWARD_POOR_BER = -3.0
+RL_REWARD_GOOD_BER = +3.0
+RL_BER_THRESHOLD_GOOD = 1e-4
+RL_BER_THRESHOLD_POOR = 1e-2
+
+# Prioritized experience replay
+RL_USE_PRIORITIZED_REPLAY = True
+RL_PRIORITY_ALPHA = 0.6  # Priority exponent
+RL_PRIORITY_BETA = 0.4  # Importance sampling weight
+
+# Cache update strategy
+CACHE_UPDATE_INTERVAL = 100  # Re-optimize cache every 100 requests
+TIME_SLOTS = 1000  # Legacy parameter for backward compatibility
+
+# Performance tracking
+RL_TRACK_LEARNING = True  # Track and save learning curves
+RL_SAVE_CHECKPOINTS = True  # Save model checkpoints
+RL_CHECKPOINT_FREQ = 2000  # Save every 2000 steps
+RL_CHECKPOINT_DIR = "./checkpoints/"
+
+# Comparison experiments
+COMPARE_POLICIES = [
+    "topk",  # Baseline 1
+    "lru",   # Baseline 2
+    "lfu",   # Baseline 3
+    "improved_dqn_noma"  # Your RL policy
+]
+
+# Logging and visualization
+RL_VERBOSE = True
+RL_PLOT_LEARNING_CURVES = True
+RL_SAVE_TRAINING_LOGS = True
+
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_rl_config():
+    """Return RL-specific configuration as dictionary."""
+    import sys
+    module = sys.modules[__name__]
+    
+    rl_params = {}
+    for attr in dir(module):
+        if attr.startswith('RL_'):
+            rl_params[attr] = getattr(module, attr)
+    
+    return rl_params
+
+
+def print_rl_config():
+    """Print RL configuration for verification."""
+    print("\n" + "="*70)
+    print("RL CONFIGURATION")
+    print("="*70)
+    
+    config = get_rl_config()
+    
+    categories = {
+        'Training': ['TRAINING_STEPS', 'TRAINING_EPISODES', 'STEPS_PER_EPISODE'],
+        'Evaluation': ['EVAL_REQUESTS', 'SEPARATE_TRAIN_EVAL', 'EVAL_EPSILON'],
+        'Neural Network': ['USE_NEURAL_NETWORK', 'HIDDEN_DIMS', 'LEARNING_RATE', 'BATCH_SIZE'],
+        'Exploration': ['EPSILON_START', 'EPSILON_END', 'EPSILON_DECAY_STEPS'],
+        'Q-Learning': ['GAMMA', 'TARGET_UPDATE_FREQ', 'TRAIN_FREQUENCY'],
+        'Rewards': ['REWARD_CACHE_HIT', 'REWARD_CACHE_MISS_SUCCESS', 'REWARD_OUTAGE']
+    }
+    
+    for category, params in categories.items():
+        print(f"\n{category}:")
+        for param in params:
+            key = f'RL_{param}'
+            if key in config:
+                print(f"  {param}: {config[key]}")
+    
+    print("\n" + "="*70 + "\n")
+
+
+if __name__ == "__main__":
+    print_rl_config()
