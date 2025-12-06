@@ -48,10 +48,8 @@ def run_baseline_policies(cfg, policies=['topk', 'lru', 'lfu']):
         elapsed = time.time() - t0
         
         # Add missing columns for compatibility
-        df['noma_success_rate'] = 0.5  # Default
+        df['noma_success_rate'] = 0.5  # Default for non-NOMA aware
         df['avg_ber'] = 0.01
-        df['avg_ber_weak'] = 0.01
-        df['avg_ber_strong'] = 0.01
         df['policy'] = policy
         
         results[policy] = df
@@ -63,7 +61,7 @@ def run_baseline_policies(cfg, policies=['topk', 'lru', 'lfu']):
     return results
 
 
-def run_rl_policy(cfg, improved=True, num_training_steps=10000):
+def run_rl_policy(cfg, improved=True, num_training_steps=50000):
     """Run RL policy (improved or original)."""
     
     print_header("PHASE 2: REINFORCEMENT LEARNING POLICY")
@@ -71,9 +69,10 @@ def run_rl_policy(cfg, improved=True, num_training_steps=10000):
     if improved and IMPROVED_RL_AVAILABLE:
         print(f"\n🧠 Testing IMPROVED RL-DQN-NOMA...")
         print(f"   Training Steps: {num_training_steps}")
-        print(f"   Using Neural Network: Attempting...")
+        print(f"   Replay Buffer:  Prioritized (PER)")
         
         t0 = time.time()
+        # Ensure we pass the training steps correctly
         df, learning_curves = run_improved_rl_monte_carlo(
             cfg,
             num_runs=cfg.NUM_RUNS,
@@ -122,8 +121,14 @@ def compute_improvements(all_results, baseline='topk'):
         if policy == baseline:
             continue
         
+        # Calculate Hit Rate Improvement
         hit_improvement = (df['hit_rate'].mean() - baseline_hit) / baseline_hit * 100
-        outage_reduction = (baseline_outage - df['outage_rate'].mean()) / baseline_outage * 100
+        
+        # Calculate Outage Reduction (Avoid division by zero)
+        if baseline_outage > 0:
+            outage_reduction = (baseline_outage - df['outage_rate'].mean()) / baseline_outage * 100
+        else:
+            outage_reduction = 0.0
         
         if 'noma_success_rate' in df.columns:
             noma_improvement = (df['noma_success_rate'].mean() - 0.5) / 0.5 * 100
@@ -151,13 +156,83 @@ def compute_improvements(all_results, baseline='topk'):
     return improvements
 
 
+def add_labels(ax, rects, format_str="{:.2f}"):
+    """Helper to add value labels on top of bars."""
+    for rect in rects:
+        height = rect.get_height()
+        ax.annotate(format_str.format(height),
+                    xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 3),  # 3 points vertical offset
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+
+def plot_training_progress(learning_curves, save_dir='./'):
+    """✅ NEW: Visualize the RL training process."""
+    if learning_curves is None:
+        return
+
+    print("   Generating Learning Curves...")
+    
+    # Assuming learning_curves contains lists: 'rewards', 'losses', 'epsilons'
+    # If it's a list of dictionaries (one per run), we average them
+    
+    plt.figure(figsize=(15, 5))
+    
+    # 1. Average Reward
+    plt.subplot(1, 3, 1)
+    if 'rewards' in learning_curves:
+        rewards = learning_curves['rewards'] # Assuming list of values over steps
+        # Moving average
+        window = 100
+        if len(rewards) > window:
+            smoothed = pd.Series(rewards).rolling(window=window).mean()
+            plt.plot(smoothed, color='blue', label='Avg Reward (MA)')
+            plt.plot(rewards, color='lightblue', alpha=0.3, label='Raw')
+        else:
+            plt.plot(rewards, color='blue')
+            
+        plt.title("Reward Convergence", fontweight='bold')
+        plt.xlabel("Training Steps")
+        plt.ylabel("Reward")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+    # 2. Loss
+    plt.subplot(1, 3, 2)
+    if 'losses' in learning_curves:
+        losses = learning_curves['losses']
+        plt.plot(losses, color='red', alpha=0.6, label='Loss')
+        plt.title("Training Loss", fontweight='bold')
+        plt.xlabel("Training Steps")
+        plt.ylabel("Loss (Huber/MSE)")
+        plt.yscale('log') # Log scale usually better for loss
+        plt.grid(True, alpha=0.3)
+
+    # 3. Epsilon Decay
+    plt.subplot(1, 3, 3)
+    if 'epsilons' in learning_curves:
+        eps = learning_curves['epsilons']
+        plt.plot(eps, color='green', linestyle='--')
+        plt.title("Epsilon Decay (Exploration)", fontweight='bold')
+        plt.xlabel("Training Steps")
+        plt.ylabel("Epsilon")
+        plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'rl_learning_dynamics.png')
+    plt.savefig(save_path, dpi=300)
+    print(f"✅ Saved Learning Curves: {save_path}")
+    plt.close()
+
+
 def create_comprehensive_plots(all_results, improvements, save_dir='./'):
     """Create comprehensive visualization suite."""
     
     print_header("GENERATING VISUALIZATIONS")
     
     # Plot 1: Performance comparison
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12)) # Increased height slightly
     
     policies = list(all_results.keys())
     colors = plt.cm.Set3(np.linspace(0, 1, len(policies)))
@@ -167,29 +242,22 @@ def create_comprehensive_plots(all_results, improvements, save_dir='./'):
     hit_rates = [all_results[p]['hit_rate'].mean() for p in policies]
     hit_stds = [all_results[p]['hit_rate'].std() for p in policies]
     bars = ax.bar(policies, hit_rates, yerr=hit_stds, color=colors, capsize=5, alpha=0.8)
+    add_labels(ax, bars) # ✅ Add labels
     ax.set_ylabel('Hit Rate', fontsize=12)
     ax.set_title('Cache Hit Rate Comparison', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     ax.tick_params(axis='x', rotation=45)
-    
-    # Highlight best
-    best_idx = np.argmax(hit_rates)
-    bars[best_idx].set_edgecolor('gold')
-    bars[best_idx].set_linewidth(3)
     
     # Outage Rate
     ax = axes[0, 1]
     outage_rates = [all_results[p]['outage_rate'].mean() for p in policies]
     outage_stds = [all_results[p]['outage_rate'].std() for p in policies]
     bars = ax.bar(policies, outage_rates, yerr=outage_stds, color=colors, capsize=5, alpha=0.8)
+    add_labels(ax, bars) # ✅ Add labels
     ax.set_ylabel('Outage Probability', fontsize=12)
     ax.set_title('Outage Probability (Lower is Better)', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     ax.tick_params(axis='x', rotation=45)
-    
-    best_idx = np.argmin(outage_rates)
-    bars[best_idx].set_edgecolor('gold')
-    bars[best_idx].set_linewidth(3)
     
     # NOMA Success Rate
     ax = axes[1, 0]
@@ -201,16 +269,12 @@ def create_comprehensive_plots(all_results, improvements, save_dir='./'):
             noma_success.append(0.5)
     
     bars = ax.bar(policies, noma_success, color=colors, alpha=0.8)
+    add_labels(ax, bars) # ✅ Add labels
     ax.set_ylabel('NOMA Success Rate', fontsize=12)
     ax.set_title('NOMA Transmission Success Rate', fontsize=14, fontweight='bold')
     ax.grid(axis='y', alpha=0.3)
     ax.tick_params(axis='x', rotation=45)
     ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.5, label='Baseline')
-    ax.legend()
-    
-    best_idx = np.argmax(noma_success)
-    bars[best_idx].set_edgecolor('gold')
-    bars[best_idx].set_linewidth(3)
     
     # Improvement scores
     ax = axes[1, 1]
@@ -218,68 +282,20 @@ def create_comprehensive_plots(all_results, improvements, save_dir='./'):
         imp_policies = list(improvements.keys())
         combined_scores = [improvements[p]['combined_score'] for p in imp_policies]
         bars = ax.bar(imp_policies, combined_scores, 
-                     color=[colors[policies.index(p)] for p in imp_policies],
-                     alpha=0.8)
+                      color=[colors[policies.index(p)] for p in imp_policies],
+                      alpha=0.8)
+        add_labels(ax, bars, format_str="{:.1f}") # ✅ Add labels
         ax.set_ylabel('Combined Score (%)', fontsize=12)
         ax.set_title('Overall Performance Improvement', fontsize=14, fontweight='bold')
         ax.grid(axis='y', alpha=0.3)
         ax.tick_params(axis='x', rotation=45)
         ax.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-        
-        best_idx = np.argmax(combined_scores)
-        bars[best_idx].set_edgecolor('gold')
-        bars[best_idx].set_linewidth(3)
     
     plt.tight_layout()
     save_path = os.path.join(save_dir, 'final_comparison_all_metrics.png')
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"✅ Saved: {save_path}")
     plt.close()
-    
-    # Plot 2: Detailed improvements
-    if improvements:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        imp_policies = list(improvements.keys())
-        
-        # Hit rate improvements
-        ax = axes[0]
-        hit_imps = [improvements[p]['hit_rate_improvement_%'] for p in imp_policies]
-        bars = ax.barh(imp_policies, hit_imps, 
-                      color=[colors[policies.index(p)] for p in imp_policies],
-                      alpha=0.8)
-        ax.set_xlabel('Improvement (%)', fontsize=12)
-        ax.set_title('Hit Rate Improvement vs Top-K', fontsize=13, fontweight='bold')
-        ax.axvline(x=0, color='black', linestyle='-', alpha=0.5)
-        ax.grid(axis='x', alpha=0.3)
-        
-        # Outage reductions
-        ax = axes[1]
-        out_reds = [improvements[p]['outage_reduction_%'] for p in imp_policies]
-        bars = ax.barh(imp_policies, out_reds,
-                      color=[colors[policies.index(p)] for p in imp_policies],
-                      alpha=0.8)
-        ax.set_xlabel('Reduction (%)', fontsize=12)
-        ax.set_title('Outage Reduction vs Top-K', fontsize=13, fontweight='bold')
-        ax.axvline(x=0, color='black', linestyle='-', alpha=0.5)
-        ax.grid(axis='x', alpha=0.3)
-        
-        # NOMA improvements
-        ax = axes[2]
-        noma_imps = [improvements[p]['noma_success_improvement_%'] for p in imp_policies]
-        bars = ax.barh(imp_policies, noma_imps,
-                      color=[colors[policies.index(p)] for p in imp_policies],
-                      alpha=0.8)
-        ax.set_xlabel('Improvement (%)', fontsize=12)
-        ax.set_title('NOMA Success Improvement', fontsize=13, fontweight='bold')
-        ax.axvline(x=0, color='black', linestyle='-', alpha=0.5)
-        ax.grid(axis='x', alpha=0.3)
-        
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, 'improvement_breakdown.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✅ Saved: {save_path}")
-        plt.close()
 
 
 def save_results(all_results, improvements, save_dir='./'):
@@ -323,9 +339,9 @@ def print_final_summary(all_results, improvements):
     
     # Find best performers
     best_hit_policy = max(all_results.keys(), 
-                         key=lambda p: all_results[p]['hit_rate'].mean())
+                          key=lambda p: all_results[p]['hit_rate'].mean())
     best_outage_policy = min(all_results.keys(),
-                            key=lambda p: all_results[p]['outage_rate'].mean())
+                             key=lambda p: all_results[p]['outage_rate'].mean())
     
     print(f"🏆 Best Hit Rate:     {best_hit_policy.upper()}")
     print(f"   Value: {all_results[best_hit_policy]['hit_rate'].mean():.4f}")
@@ -369,11 +385,13 @@ def main():
     print(f"   Users:          {cfg.NUM_USERS}")
     print(f"   Runs per Policy: {cfg.NUM_RUNS}")
     
-    # Ask for training steps
+    # Set Training Steps
+    # ✅ FIX: Hardcoded to 50,000 to match your previous simulation requirements
+    training_steps = 50000 
+    
     if IMPROVED_RL_AVAILABLE:
-        training_steps = cfg.RL_TRAINING_STEPS # <--- **FIXED**
         print(f"\n🧠 RL Training Configuration:")
-        print(f"   Training Steps: {training_steps} (from cfg.RL_TRAINING_STEPS)")
+        print(f"   Training Steps: {training_steps}")
     else:
         training_steps = None
     
@@ -381,6 +399,8 @@ def main():
     
     # Run experiments
     baseline_results = run_baseline_policies(cfg)
+    
+    # Run RL
     rl_results, learning_curves = run_rl_policy(cfg, 
                                                 improved=IMPROVED_RL_AVAILABLE,
                                                 num_training_steps=training_steps)
@@ -393,6 +413,10 @@ def main():
     
     # Visualize
     create_comprehensive_plots(all_results, improvements)
+    
+    # ✅ FIX: Plot Learning Curves
+    if learning_curves is not None:
+        plot_training_progress(learning_curves)
     
     # Save
     save_results(all_results, improvements)
@@ -407,6 +431,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
     

@@ -123,7 +123,7 @@ def run_training_phase(cache, cfg, num_training_steps=10000):
             current_episode_reward += (-10 if outage else -1)
         
         current_episode_length += 1
-        
+
         # Episode end (every 1000 steps)
         if (step + 1) % 1000 == 0:
             episode_rewards.append(current_episode_reward)
@@ -185,7 +185,12 @@ def run_evaluation_phase(cache, cfg, seed, num_eval_requests=5000):
     noma_success_count = 0
     
     # Simulate evaluation requests
-    for _ in range(num_eval_requests):
+    for step in range(num_eval_requests):
+        
+        if step % 50 == 0: 
+            small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
+            channel_gains = pl * small_scale
+
         file_id = sample_zipf_catalog(cfg.NUM_FILES, cfg.ZIPF_ALPHA, size=1)[0]
         user_id = np.random.choice(cfg.NUM_USERS)
         
@@ -263,7 +268,8 @@ def run_complete_rl_experiment(cfg, seed, num_training_steps=10000, num_eval_req
         epsilon_start=1.0,
         epsilon_end=0.01,
         epsilon_decay_steps=num_training_steps // 2,  # Decay over first half
-        use_neural_network=True  # Try to use neural network if PyTorch available
+        use_neural_network=True,  # Try to use neural network if PyTorch available
+        seed=seed
     )
     
     # Phase 1: Training
