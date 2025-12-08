@@ -16,9 +16,6 @@ from src.noma.power_allocation import allocate_power_gridsearch, allocate_power_
 
 # Dynamic caches
 from src.caching.dynamic_cache import LRUCache, LFUCache, RandomCache
-from src.caching.optimized_cache import JointOptimizationCache, ReinforcementLearningCache
-
-from src.caching.noma_aware_cache import NomaAwarePredictiveCache, MultiObjectiveCache
 
 
 def compute_popularity(requests):
@@ -223,24 +220,11 @@ def run_single_experiment_with_learning(seed, cfg):
     distances = user_pos[:, 2]
     pl = np.array([channel_model.pathloss(d, cfg.PATHLOSS_EXPONENT) for d in distances])
     
-    # Initialize novel cache based on policy
-    if cfg.CACHE_POLICY == "noma_aware":
-        cache = NomaAwarePredictiveCache(cfg.CACHE_SIZE, cfg.NUM_FILES, cfg.NUM_USERS)
-    elif cfg.CACHE_POLICY == "joint_opt":
-        small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
-        channel_gains = pl * small_scale
-        cache = JointOptimizationCache(cfg.CACHE_SIZE, cfg.NUM_FILES, channel_gains, cfg)
-    elif cfg.CACHE_POLICY == "multi_obj":
-        cache = MultiObjectiveCache(cfg.CACHE_SIZE, cfg.NUM_FILES, cfg.MO_OBJECTIVES)
-    elif cfg.CACHE_POLICY == "rl":
-        cache = ReinforcementLearningCache(cfg.CACHE_SIZE, cfg.NUM_FILES)
-    else:
-        # Fallback to existing static cache
-        requests_for_popularity = sample_zipf_catalog(cfg.NUM_FILES, cfg.ZIPF_ALPHA, 
-                                                    size=cfg.NUM_USERS * cfg.REQUESTS_PER_USER)
-        ranking, _ = compute_popularity(requests_for_popularity)
-        cache = StaticTopKCache(cfg.CACHE_SIZE)
-        cache.populate(ranking)
+    # Fallback to existing static cache
+    requests_for_popularity = sample_zipf_catalog(cfg.NUM_FILES, cfg.ZIPF_ALPHA, size=cfg.NUM_USERS * cfg.REQUESTS_PER_USER)
+    ranking, _ = compute_popularity(requests_for_popularity)
+    cache = StaticTopKCache(cfg.CACHE_SIZE)
+    cache.populate(ranking)
     
     # Learning-based simulation with time slots
     total_hits = 0
@@ -385,12 +369,10 @@ def compare_novel_algorithms(cfg):
     """Compare novel algorithms against baselines."""
     
     policies_to_test = [
-        "topk",           # Baseline
-        "lru",            # Baseline  
-        "noma_aware",     # Novel 1
-        "joint_opt",      # Novel 2
-        "multi_obj",      # Novel 3
-        "rl"              # Novel 4
+        "topk",          
+        "lru",            
+        "lfu",
+        "random"
     ]
     
     results = {}

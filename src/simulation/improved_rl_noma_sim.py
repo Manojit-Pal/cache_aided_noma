@@ -19,8 +19,6 @@ try:
     from src.caching.improved_dqn_noma_cache import ImprovedDQNNomaCache
     USE_IMPROVED = True
 except ImportError:
-    from src.caching.rl_noma_cache import DQNNomaCache as ImprovedDQNNomaCache
-    USE_IMPROVED = False
     print("⚠️ Using fallback RL cache")
 
 # Optional TensorBoard
