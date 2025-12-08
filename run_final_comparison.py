@@ -1,8 +1,4 @@
 # run_final_comparison.py
-"""
-Final comprehensive comparison script for your final year project.
-Compares improved RL against all baselines with proper visualizations.
-"""
 
 import sys
 import os
@@ -431,4 +427,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

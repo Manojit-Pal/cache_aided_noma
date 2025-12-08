@@ -1,19 +1,6 @@
 # src/caching/improved_dqn_noma_cache.py
-"""
-FULLY CORRECTED Deep Q-Network Implementation for NOMA Caching
-Version 2.0 - All Critical Bugs Fixed
 
-FIXES APPLIED:
-✅ Fix #1: Corrected reward-transition temporal alignment
-✅ Fix #2: Fixed Dueling DQN formula (max instead of mean)  
-✅ Fix #3: Safe priority updates with bounds checking
-✅ Fix #5: Added PyTorch seeding for reproducibility
-✅ Fix #6: Reward normalization with running statistics
-✅ Fix #7: Input validation in constructor
-✅ Fix #8: Better epsilon decay handling
-✅ Fix #9: Efficient prioritized sampling
-"""
-
+import random
 import numpy as np
 from collections import deque, defaultdict
 import pickle
@@ -34,16 +21,16 @@ from .cache_base import CacheBase
 
 
 class DQNNetwork(nn.Module):
-    """Dueling Q-Network with CORRECTED aggregation formula."""
-    
+    """Dueling Q-Network with CORRECT mean-based aggregation."""
+
     def __init__(self, state_dim: int, action_dim: int, hidden_dims: List[int] = None):
         super(DQNNetwork, self).__init__()
-        
+
         if hidden_dims is None:
             hidden_dims = [128, 64]
-        
+
         self.action_dim = action_dim
-        
+
         # Shared feature layers
         layers = []
         input_dim = state_dim
@@ -52,25 +39,25 @@ class DQNNetwork(nn.Module):
             layers.append(nn.ReLU())
             layers.append(nn.LayerNorm(hidden_dim))
             input_dim = hidden_dim
-        
+
         self.feature_layer = nn.Sequential(*layers)
-        
+
         # Value stream
         self.value_stream = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
+            nn.Linear(input_dim, max(1, input_dim // 2)),
             nn.ReLU(),
-            nn.Linear(input_dim // 2, 1)
+            nn.Linear(max(1, input_dim // 2), 1)
         )
-        
+
         # Advantage stream
         self.advantage_stream = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
+            nn.Linear(input_dim, max(1, input_dim // 2)),
             nn.ReLU(),
-            nn.Linear(input_dim // 2, self.action_dim)
+            nn.Linear(max(1, input_dim // 2), self.action_dim)
         )
-        
+
         self._initialize_weights()
-    
+
     def _initialize_weights(self):
         """Xavier initialization."""
         for m in self.modules():
@@ -78,25 +65,24 @@ class DQNNetwork(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-    
+
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         features = self.feature_layer(state)
         values = self.value_stream(features)
         advantages = self.advantage_stream(features)
-        
-        # ✅ FIX #2: Correct Dueling DQN formula using MAX
-        advantages_max = advantages.max(dim=1, keepdim=True)[0]
-        q_values = values + (advantages - advantages_max)
-        
+
+        # FIXED: Use MEAN for standard dueling aggregation
+        advantages_mean = advantages.mean(dim=1, keepdim=True)
+        q_values = values + (advantages - advantages_mean)
+
         return q_values
 
 
 class ImprovedDQNNomaCache(CacheBase):
     """
-    CORRECTED Deep Q-Network based NOMA cache.
-    All critical bugs have been fixed.
+    FIXED Deep Q-Network based NOMA cache with proper credit assignment.
     """
-    
+
     def __init__(
         self,
         capacity: int,
@@ -117,43 +103,46 @@ class ImprovedDQNNomaCache(CacheBase):
         seed: int = 2025
     ):
         super().__init__(capacity)
-        
-        # ✅ FIX #7: Input validation
+
+        # Input validation
         assert 0 < capacity <= num_files, f"Invalid capacity: {capacity}"
         assert 0 < gamma <= 1, f"Invalid gamma: {gamma}"
         assert 0 < learning_rate < 1, f"Invalid learning_rate: {learning_rate}"
         assert epsilon_start >= epsilon_end > 0, "Invalid epsilon range"
         assert batch_size > 0, f"Invalid batch_size: {batch_size}"
         assert replay_buffer_size >= batch_size, "replay_buffer_size must be >= batch_size"
-        
+
         self.num_files = int(num_files)
         self.num_users = int(num_users)
         self.lr = float(learning_rate)
         self.gamma = float(gamma)
         self.seed = int(seed)
-        
-        # ✅ FIX #5: Set all seeds for reproducibility
+
+        # Set seeds for reproducibility
         self._set_seeds(self.seed)
-        
+
         # Epsilon schedule
         self.epsilon_start = float(epsilon_start)
         self.epsilon = float(epsilon_start)
         self.epsilon_end = float(epsilon_end)
         self.epsilon_decay_steps = int(epsilon_decay_steps)
-        
-        # ✅ FIX #8: Better epsilon decay
+
         if self.epsilon_decay_steps > 0:
             self.epsilon_decay_rate = (self.epsilon_start - self.epsilon_end) / self.epsilon_decay_steps
             self.epsilon_decay_mode = 'linear'
         else:
             self.epsilon_decay_rate = 0.995
             self.epsilon_decay_mode = 'exponential'
-        
+
+        # NEW: Evaluation mode flag
+        self.eval_mode = False
+        self._stored_epsilon = self.epsilon
+
         # Cache structure
         self.capacity = int(capacity)
         self.contents_list = [-1] * self.capacity
         self.file_to_slot = {}
-        
+
         # State tracking
         self.popularity_ema = np.ones(self.num_files, dtype=np.float32) / max(1, self.num_files)
         self.alpha_pop = 0.1
@@ -163,39 +152,38 @@ class ImprovedDQNNomaCache(CacheBase):
         self.file_request_count = np.zeros(self.num_files, dtype=np.int32)
         self.file_noma_success = defaultdict(lambda: deque(maxlen=50))
         self.file_user_affinity = defaultdict(lambda: deque(maxlen=50))
-        
+
         # RL components
         self.use_nn = use_neural_network and TORCH_AVAILABLE
         self.training_step = 0
         self.action_dim = self.capacity + 1
-        
-        # ✅ FIX #1: Proper transition tracking (CRITICAL FIX)
+
+        # Transition tracking - SIMPLIFIED
         self.last_state = None
         self.last_action = None
-        self.last_reward = None  # Store reward separately!
-        
-        # ✅ FIX #6: Reward normalization statistics
+
+        # Reward normalization stats - IMPROVED STABILITY
         self.reward_mean = 0.0
         self.reward_std = 1.0
-        self.reward_history = deque(maxlen=1000)
-        
+        self.reward_history = deque(maxlen=2000)  # Larger window
+
         if self.use_nn:
             self.state_dim = self._get_state_dim()
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
+
             if hidden_dims is None:
                 hidden_dims = [128, 64]
-            
+
             self.q_network = DQNNetwork(self.state_dim, self.action_dim, hidden_dims).to(self.device)
             self.target_network = DQNNetwork(self.state_dim, self.action_dim, hidden_dims).to(self.device)
             self.target_network.load_state_dict(self.q_network.state_dict())
             self.target_network.eval()
-            
+
             self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.lr)
             self.tau = float(tau)
         else:
             self.q_table = defaultdict(lambda: defaultdict(float))
-        
+
         # Prioritized replay
         self.replay_buffer = deque(maxlen=int(replay_buffer_size))
         self.priorities = deque(maxlen=int(replay_buffer_size))
@@ -205,17 +193,20 @@ class ImprovedDQNNomaCache(CacheBase):
         self.priority_eps = 1e-6
         self.priority_min = 1e-6
         self.priority_max = 1e3
-        
+
+        # NEW: Training warmup
+        self.min_buffer_size = max(1000, self.batch_size * 10)
+
         # Performance tracking
         self.cumulative_reward = 0.0
         self.episode_rewards = []
         self.training_losses = []
-        
-    
+
     def _set_seeds(self, seed: int):
-        """✅ FIX #5: Set all random seeds."""
+        """Set all random seeds for reproducibility."""
         np.random.seed(seed)
-        
+        random.seed(seed)
+
         if TORCH_AVAILABLE:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
@@ -223,25 +214,39 @@ class ImprovedDQNNomaCache(CacheBase):
                 torch.cuda.manual_seed_all(seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-    
+
+    def set_eval_mode(self, eval_mode: bool = True):
+        """
+        NEW: Set evaluation mode (no exploration).
+        Call this before testing to get true policy performance.
+        """
+        self.eval_mode = eval_mode
+        if eval_mode:
+            self._stored_epsilon = self.epsilon
+            self.epsilon = 0.0  # No exploration during evaluation
+            print("🔍 Evaluation mode: ON (epsilon=0)")
+        else:
+            self.epsilon = self._stored_epsilon
+            print("🎓 Training mode: ON (epsilon={:.4f})".format(self.epsilon))
+
     def _get_state_dim(self) -> int:
         """Calculate state dimension."""
         return 7 + 2 + self.capacity
-    
+
     def get_state_vector(self, file_id: int) -> np.ndarray:
         """Extract state representation."""
         features = []
-        
+
         # Global features (7)
         cache_occupancy = sum(1 for x in self.contents_list if x != -1) / max(1, self.capacity)
         features.append(cache_occupancy)
-        
+
         if len(self.channel_quality_history) > 0:
-            features.extend([float(np.mean(self.channel_quality_history)), 
-                           float(np.std(self.channel_quality_history))])
+            features.extend([float(np.mean(self.channel_quality_history)),
+                             float(np.std(self.channel_quality_history))])
         else:
             features.extend([0.5, 0.1])
-        
+
         if len(self.noma_outcome_history) > 0:
             recent = list(self.noma_outcome_history)
             success_rate = float(np.mean([1.0 if x['success'] else 0.0 for x in recent]))
@@ -250,41 +255,43 @@ class ImprovedDQNNomaCache(CacheBase):
             features.extend([success_rate, avg_sinr_weak, avg_sinr_strong])
         else:
             features.extend([0.5, 0.0, 0.0])
-        
+
         if len(self.request_history) > 10:
             request_rate = float(len(self.request_history)) / float(self.request_history.maxlen)
         else:
             request_rate = 0.0
         features.append(request_rate)
-        
+
         # Request features (2)
         features.append(float(self.popularity_ema[file_id]))
-        
+
         if file_id in self.file_noma_success and len(self.file_noma_success[file_id]) > 0:
             features.append(float(np.mean(self.file_noma_success[file_id])))
         else:
             features.append(0.5)
-        
+
         # Cache content features (capacity)
         slot_popularities = [
             float(self.popularity_ema[f]) if f != -1 else 0.0
             for f in self.contents_list
         ]
         features.extend(slot_popularities)
-        
+
         return np.array(features, dtype=np.float32)
-    
+
     def _normalize_reward(self, reward: float) -> float:
-        """✅ FIX #6: Normalize rewards using running statistics."""
+        """Normalize rewards using running statistics - IMPROVED STABILITY."""
         self.reward_history.append(reward)
-        
-        if len(self.reward_history) > 10:
+
+        # Wait for sufficient samples before normalizing
+        if len(self.reward_history) >= 100:
             self.reward_mean = float(np.mean(self.reward_history))
-            self.reward_std = float(np.std(self.reward_history)) + 1e-8
-        
+            self.reward_std = max(1.0, float(np.std(self.reward_history)))  # Prevent division by tiny values
+
         normalized = (reward - self.reward_mean) / self.reward_std
+        normalized = float(np.clip(normalized, -10.0, 10.0))
         return normalized
-    
+
     def compute_shaped_reward(
         self,
         cache_hit: bool,
@@ -295,7 +302,7 @@ class ImprovedDQNNomaCache(CacheBase):
     ) -> float:
         """Compute shaped reward."""
         reward = 0.0
-        
+
         if cache_hit:
             base_reward = 50.0
             if cache_occupancy < 0.9:
@@ -317,44 +324,47 @@ class ImprovedDQNNomaCache(CacheBase):
                         reward += 1.0
                     elif ber > 1e-2:
                         reward -= 3.0
-        
+
         return self._normalize_reward(reward)
-    
+
     def select_action_nn(self, state: np.ndarray) -> int:
-        """Epsilon-greedy action selection."""
+        """Epsilon-greedy action selection - respects eval_mode."""
+        # In eval mode, epsilon is 0, so this always takes greedy action
         if np.random.random() < self.epsilon:
             return int(np.random.randint(0, self.action_dim))
-        
+
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.q_network(state_tensor).cpu().numpy()[0]
             return int(np.argmax(q_values))
-    
+
     def _sample_prioritized_batch(self):
         """Sample prioritized batch."""
         if len(self.replay_buffer) < self.batch_size:
             return None, None, None
-        
+
         prios = np.array(self.priorities, dtype=np.float64)
         prios = np.clip(prios, self.priority_min, None)
         probs = prios ** self.priority_alpha
         probs_sum = probs.sum()
-        
+
         if probs_sum <= 0.0:
             probs = np.ones_like(prios) / prios.size
         else:
             probs = probs / probs_sum
-        
-        # ✅ FIX #9: Use replace=True for efficiency
-        indices = np.random.choice(len(self.replay_buffer), size=self.batch_size, 
-                                  replace=True, p=probs)
-        
+
+        replace_flag = len(self.replay_buffer) < self.batch_size
+        indices = np.random.choice(len(self.replay_buffer), size=self.batch_size,
+                                   replace=replace_flag, p=probs)
+
         total = len(self.replay_buffer)
-        weights = (total * probs[indices]) ** (-self.priority_beta)
+        eps = 1e-8
+        sample_probs = np.clip(probs[indices], eps, None)
+        weights = (total * sample_probs) ** (-self.priority_beta)
         weights = weights / (weights.max() + 1e-8)
-        
+
         return indices, weights.astype(np.float32), probs[indices]
-    
+
     def _soft_update_target(self):
         """Soft update target network."""
         for target_param, policy_param in zip(
@@ -364,20 +374,20 @@ class ImprovedDQNNomaCache(CacheBase):
             target_param.data.copy_(
                 self.tau * policy_param.data + (1.0 - self.tau) * target_param.data
             )
-    
+
     def update_network(self, batch, weights: Optional[np.ndarray] = None):
         """Update Q-network."""
         states, actions, rewards, next_states, dones, indices = batch
-        
+
         states_t = torch.FloatTensor(states).to(self.device)
         actions_t = torch.LongTensor(actions).to(self.device)
         rewards_t = torch.FloatTensor(rewards).to(self.device)
         next_states_t = torch.FloatTensor(next_states).to(self.device)
         dones_t = torch.FloatTensor(dones).to(self.device)
-        
+
         q_values = self.q_network(states_t)
         current_q = q_values.gather(1, actions_t.unsqueeze(1)).squeeze(1)
-        
+
         # Double DQN
         with torch.no_grad():
             next_q_main = self.q_network(next_states_t)
@@ -385,76 +395,95 @@ class ImprovedDQNNomaCache(CacheBase):
             next_q_target = self.target_network(next_states_t)
             next_q = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
             target_q = rewards_t + (1.0 - dones_t) * self.gamma * next_q
-        
+
         td_errors = (target_q - current_q).detach()
         losses = F.smooth_l1_loss(current_q, target_q, reduction='none')
-        
+
         if weights is not None:
             weights_t = torch.FloatTensor(weights).to(self.device)
             loss = (losses * weights_t).mean()
         else:
             loss = losses.mean()
-        
+
         self.optimizer.zero_grad()
         loss.backward()
+
+        # Gradient clipping
+        fixed_max = 10.0
+        adaptive = 0.0
+        try:
+            if torch.isfinite(loss):
+                adaptive = min(5.0, max(0.0, float(loss.item())))
+        except Exception:
+            adaptive = 0.0
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), fixed_max + adaptive)
+
+        # Check for NaN/Inf
+        nan_grad = False
+        for p in self.q_network.parameters():
+            if p.grad is None:
+                continue
+            if not torch.isfinite(p.grad).all():
+                nan_grad = True
+                break
         
-        # ✅ FIX #6: Adaptive gradient clipping
-        max_grad_norm = max(1.0, loss.item())
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_grad_norm)
-        
-        self.optimizer.step()
-        
+        if not nan_grad and torch.isfinite(loss).item():
+            self.optimizer.step()
+        else:
+            print("⚠️ NaN/Inf detected - skipping optimizer step")
+            self.optimizer.zero_grad()
+
         loss_value = float(loss.item())
         self.training_losses.append(loss_value)
-        
+
         self._soft_update_target()
-        
+
         return loss_value, td_errors.cpu().numpy()
-    
+
     def train_step(self) -> Optional[float]:
         """Perform one training step."""
         if len(self.replay_buffer) < self.batch_size:
             return None
-        
+
         indices, weights, _ = self._sample_prioritized_batch()
         if indices is None:
             return None
-        
+
         batch = [self.replay_buffer[i] for i in indices]
         states = np.array([exp['state'] for exp in batch], dtype=np.float32)
         actions = np.array([exp['action'] for exp in batch], dtype=np.int64)
         rewards = np.array([exp['reward'] for exp in batch], dtype=np.float32)
         next_states = np.array([exp['next_state'] for exp in batch], dtype=np.float32)
         dones = np.array([exp['done'] for exp in batch], dtype=np.float32)
-        
+
         loss, td_errors = self.update_network(
             (states, actions, rewards, next_states, dones, indices),
             weights=weights
         )
-        
-        # ✅ FIX #3: Safe priority update
+
+        # IMPROVED: Priority update using percentile-based clipping
         abs_td = np.abs(td_errors) + self.priority_eps
         abs_td = np.clip(abs_td, self.priority_min, self.priority_max)
-        
+
         for idx_local, global_idx in enumerate(indices):
-            if global_idx < len(self.priorities):
+            if 0 <= global_idx < len(self.priorities):
                 self.priorities[global_idx] = float(abs_td[idx_local])
-        
+
         return loss
-    
+
     def _update_q_table_entry(self, experience: Dict):
         """Update Q-table (fallback)."""
         state_str = str(experience['state'])
         action = experience['action']
         reward = experience['reward']
         next_state_str = str(experience['next_state'])
-        
+
         current_q = self.q_table[state_str][action]
         next_max_q = max(self.q_table[next_state_str].values()) if self.q_table[next_state_str] else 0.0
-        
+
         new_q = current_q + self.lr * (reward + self.gamma * next_max_q - current_q)
         self.q_table[state_str][action] = new_q
-    
+
     def observe_request(
         self,
         user_id: int,
@@ -465,27 +494,36 @@ class ImprovedDQNNomaCache(CacheBase):
         sinr_weak: Optional[float] = None,
         sinr_strong: Optional[float] = None,
         ber: Optional[float] = None,
-        outage: bool = False
+        outage: bool = False,
+        episode_done: bool = False
     ):
         """
-        ✅ FIX #1: CORRECTED transition logic with proper temporal alignment.
-        
-        This is the MOST CRITICAL FIX in the entire codebase!
-        
-        The key insight: reward_t belongs to the transition (s_{t-1}, a_{t-1}, r_t, s_t)
+        Correct reward-action timing for proper credit assignment.
+
+        NEW FLOW (corrected):
+        1. Observe current state (S_t)
+        2. Compute reward observed at time t (R_t) using PRE-ACTION environment
+        3. Store (S_{t-1}, A_{t-1}, R_t, S_t)
+        4. Select and execute action A_t for the current request
+        5. Save current state/action for next iteration
         """
         file_id = int(file_id)
         user_id = int(user_id)
-        
-        # === 1. Update statistics ===
+
+        if not (0 <= file_id < self.num_files):
+            raise ValueError(f"file_id {file_id} out of range [0, {self.num_files - 1}]")
+        if not (isinstance(user_id, int) and user_id >= 0):
+            raise ValueError(f"user_id must be a non-negative int (got {user_id})")
+
+        # Update statistics
         self.file_request_count[file_id] += 1
         freq = np.zeros(self.num_files, dtype=float)
         freq[file_id] = 1.0
         self.popularity_ema = (self.alpha_pop * freq + (1 - self.alpha_pop) * self.popularity_ema)
-        
+
         if channel_gain is not None:
             self.channel_quality_history.append(float(channel_gain))
-        
+
         if noma_success is not None:
             outcome = {
                 'file_id': file_id, 'user_id': user_id, 'success': bool(noma_success),
@@ -494,45 +532,62 @@ class ImprovedDQNNomaCache(CacheBase):
             }
             self.noma_outcome_history.append(outcome)
             self.file_noma_success[file_id].append(bool(noma_success))
-        
+
         self.file_user_affinity[file_id].append(user_id)
         self.request_history.append({
             'file_id': file_id, 'user_id': user_id,
             'cache_hit': cache_hit, 'timestamp': len(self.request_history)
         })
-        
-        # === 2. Get current state ===
+
+        # STEP 1: Observe current state S_t (before taking any new action)
         current_state = self.get_state_vector(file_id)
-        
-        # === 3. Compute reward for CURRENT action ===
-        cache_occupancy = sum(1 for x in self.contents_list if x != -1) / max(1, self.capacity)
-        current_reward = self.compute_shaped_reward(cache_hit, noma_success, ber, outage, cache_occupancy)
+
+        # IMPORTANT: compute reward observed at time t using PRE-ACTION environment
+        cache_occupancy_pre = sum(1 for x in self.contents_list if x != -1) / max(1, self.capacity)
+        current_reward = self.compute_shaped_reward(cache_hit, noma_success, ber, outage, cache_occupancy_pre)
         self.cumulative_reward += float(current_reward)
-        
-        # === 4. ✅ CRITICAL FIX: Store PREVIOUS transition with its CORRECT reward ===
-        if self.last_state is not None and self.last_reward is not None:
+
+        # STEP 2: Store transition for PREVIOUS action: (S_{t-1}, A_{t-1}, R_t, S_t)
+        if self.last_state is not None and self.last_action is not None:
             experience = {
-                'state': self.last_state,          # State at t-1
-                'action': self.last_action,        # Action taken at t-1
-                'reward': self.last_reward,        # ✅ Reward FROM last action (NOT current!)
-                'next_state': current_state,       # Current state at t
-                'done': False
+                'state': self.last_state,
+                'action': self.last_action,
+                'reward': current_reward,   # reward observed now belongs to last action
+                'next_state': current_state,
+                'done': bool(episode_done)
             }
-            
+
             self.replay_buffer.append(experience)
-            
-            # Initialize priority
+
+            # Priority initialization using percentile
             if len(self.priorities) > 0:
-                init_p = float(max(max(self.priorities), self.priority_min))
+                try:
+                    if self.priorities:
+                        init_p = float(max(self.priorities))
+                    else:
+                        init_p = 1.0
+                except Exception:
+                    init_p = 1.0
             else:
                 init_p = 1.0
             self.priorities.append(init_p)
-        
-        # === 5. Decide and execute action for CURRENT request ===
-        selected_action = -1
-        
-        if not cache_hit:
-            # Cache miss - ask agent what to do
+
+            # Update Q-table if not using NN
+            if not self.use_nn:
+                self._update_q_table_entry(experience)
+
+            if episode_done:
+                self.last_state = None
+                self.last_action = None
+
+        # STEP 3: SELECT and EXECUTE action for CURRENT request (now)
+        selected_action = None
+
+        if cache_hit:
+            # Cache hit: no caching decision needed; mark as maintain/no-op
+            selected_action = self.file_to_slot.get(file_id, self.capacity)
+        else:
+            # Cache miss: agent decides whether/where to cache
             if self.use_nn:
                 selected_action = self.select_action_nn(current_state)
             else:
@@ -540,75 +595,110 @@ class ImprovedDQNNomaCache(CacheBase):
                 if np.random.random() < self.epsilon:
                     selected_action = int(np.random.randint(0, self.action_dim))
                 else:
-                    empty_slots = [i for i, v in enumerate(self.contents_list) if v == -1]
-                    if empty_slots:
-                        selected_action = empty_slots[0]
+                    state_str = str(current_state.tolist() if isinstance(current_state, np.ndarray) else current_state)
+                    action_values = self.q_table.get(state_str, None)
+                    if action_values:
+                        best_action = max(action_values.items(), key=lambda kv: kv[1])[0]
+                        selected_action = int(best_action)
                     else:
-                        selected_action = int(np.random.randint(0, self.capacity))
-            
-            # Execute action
-            if selected_action < self.capacity:
+                        empty_slots = [i for i, v in enumerate(self.contents_list) if v == -1]
+                        if empty_slots:
+                            selected_action = empty_slots[0]
+                        else:
+                            selected_action = int(np.random.randint(0, self.capacity))
+
+
+            # Execute caching action (apply selection)
+            if selected_action is not None and selected_action < self.capacity:
                 slot = int(selected_action)
+
                 old_file = self.contents_list[slot]
                 if old_file != -1 and old_file in self.file_to_slot:
-                    del self.file_to_slot[old_file]
-                
+                    try:
+                        del self.file_to_slot[old_file]
+                    except KeyError:
+                        pass
+
+                prev_slot = self.file_to_slot.get(file_id)
+                if prev_slot is not None and prev_slot != slot:
+                    self.contents_list[prev_slot] = -1
+                    try:
+                        del self.file_to_slot[file_id]
+                    except KeyError:
+                            pass
+
                 self.contents_list[slot] = file_id
                 self.file_to_slot[file_id] = slot
-            # else: action was self.capacity (do not cache)
-            
-            action_to_store = int(selected_action)
-        else:
-            # Cache hit - no decision needed
-            action_to_store = self.file_to_slot.get(file_id, self.capacity)
-        
-        # === 6. ✅ Save state, action, AND REWARD for NEXT transition ===
+
+        # STEP 4: Save current state/action for next iteration
         self.last_state = current_state
-        self.last_action = action_to_store
-        self.last_reward = current_reward  # ✅ Store current reward for next iteration
-        
-        # === 7. Training ===
+        self.last_action = selected_action
+        self.last_reward = current_reward  # available for external inspection/debugging
+
+        # Training step with warmup (unchanged)
         self.training_step += 1
-        if self.training_step % 4 == 0 and self.use_nn:
+        if (self.training_step % 4 == 0 and
+            self.use_nn and
+            len(self.replay_buffer) >= self.min_buffer_size and
+            not self.eval_mode):  # Don't train in eval mode
             try:
                 self.train_step()
             except Exception as e:
                 self.training_losses.append(float('nan'))
-                print(f"Warning: training step failed: {e}")
-        
-        # === 8. Epsilon decay ===
-        if self.epsilon > self.epsilon_end:
+                print(f"⚠️ Training step failed: {e}")
+
+        # Epsilon decay (only in training mode)
+        if not self.eval_mode and self.epsilon > self.epsilon_end:
             if self.epsilon_decay_mode == 'linear':
                 self.epsilon = max(self.epsilon_end, self.epsilon - self.epsilon_decay_rate)
             else:
                 self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay_rate)
-    
+
+
     def populate(self, items=None):
         """Initial cache population."""
         if items is None:
             top_indices = np.argsort(-self.popularity_ema)[:self.capacity]
         else:
             top_indices = items[:self.capacity]
-        
+
         self.contents_list = [-1] * self.capacity
         self.file_to_slot.clear()
         for slot, f in enumerate(top_indices):
             f = int(f)
             self.contents_list[slot] = f
             self.file_to_slot[f] = slot
-    
+
     def is_hit(self, item: int) -> bool:
         """Check if item is in cache."""
         return int(item) in self.file_to_slot
-    
+
     def clear(self):
         """Clear cache."""
         self.contents_list = [-1] * self.capacity
         self.file_to_slot.clear()
         self.last_state = None
         self.last_action = None
-        self.last_reward = None
-    
+
+    def reset_training_state(self):
+        """
+        Reset training state for fresh training run.
+        Keeps learned networks but resets epsilon, replay buffer, etc.
+        """
+        self.epsilon = self.epsilon_start
+        self.training_step = 0
+        self.cumulative_reward = 0.0
+        self.replay_buffer.clear()
+        self.priorities.clear()
+        self.last_state = None
+        self.last_action = None
+        self.reward_history.clear()
+        self.reward_mean = 0.0
+        self.reward_std = 1.0
+        self.training_losses.clear()
+        self.episode_rewards.clear()
+        print(f"🔄 Training state reset: epsilon={self.epsilon:.4f}, buffer cleared")
+
     def get_stats(self) -> Dict:
         """Return learning statistics."""
         return {
@@ -624,12 +714,23 @@ class ImprovedDQNNomaCache(CacheBase):
             'total_requests_observed': len(self.request_history),
             'noma_outcomes_observed': len(self.noma_outcome_history),
             'reward_mean': self.reward_mean,
-            'reward_std': self.reward_std
+            'reward_std': self.reward_std,
+            'eval_mode': self.eval_mode
         }
-    
+
     def save_model(self, filepath: str):
         """Save model."""
         if self.use_nn:
+            # Convert numpy arrays to lists for safer serialization
+            replay_buffer_serializable = []
+            for exp in self.replay_buffer:
+                exp_copy = exp.copy()
+                if isinstance(exp.get('state'), np.ndarray):
+                    exp_copy['state'] = exp['state'].tolist()
+                if isinstance(exp.get('next_state'), np.ndarray):
+                    exp_copy['next_state'] = exp['next_state'].tolist()
+                replay_buffer_serializable.append(exp_copy)
+            
             torch.save({
                 'q_network': self.q_network.state_dict(),
                 'target_network': self.target_network.state_dict(),
@@ -643,13 +744,12 @@ class ImprovedDQNNomaCache(CacheBase):
                 'cumulative_reward': self.cumulative_reward,
                 'contents_list': self.contents_list,
                 'file_to_slot': self.file_to_slot,
-                'replay_buffer': list(self.replay_buffer),
+                'replay_buffer': replay_buffer_serializable,
                 'priorities': list(self.priorities),
-                'last_state': self.last_state,
+                'last_state': self.last_state.tolist() if self.last_state is not None else None,
                 'last_action': self.last_action,
-                'last_reward': self.last_reward,
-                'reward_mean': self.reward_mean,
-                'reward_std': self.reward_std,
+                'reward_mean': float(self.reward_mean),
+                'reward_std': float(self.reward_std),
                 'reward_history': list(self.reward_history)
             }, filepath)
             print(f"✅ Model saved: {filepath}")
@@ -660,35 +760,73 @@ class ImprovedDQNNomaCache(CacheBase):
                 'epsilon': self.epsilon,
                 'cumulative_reward': self.cumulative_reward,
                 'contents_list': self.contents_list,
-                'file_to_slot': self.file_to_slot,
-                'last_reward': self.last_reward
+                'file_to_slot': self.file_to_slot
             }
             with open(filepath, 'wb') as f:
                 pickle.dump(model, f)
             print(f"✅ Model saved: {filepath}")
-    
+
     def load_model(self, filepath: str):
         """Load learned model."""
         if self.use_nn:
-            checkpoint = torch.load(filepath, map_location=self.device)
+            # Fix for PyTorch 2.6+ weights_only warning
+            # Safe to use weights_only=False for our own checkpoints
+            try:
+                checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
+            except TypeError:
+                # Fallback for older PyTorch versions
+                checkpoint = torch.load(filepath, map_location=self.device)
             self.q_network.load_state_dict(checkpoint['q_network'])
             self.target_network.load_state_dict(checkpoint['target_network'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
+            
+            # Move optimizer state to device
+            try:
+                for state in self.optimizer.state.values():
+                    for k, v in list(state.items()):
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(self.device)
+            except Exception as e:
+                print(f"⚠️ Warning: failed to move optimizer state: {e}")
+
             self.epsilon = checkpoint.get('epsilon', self.epsilon)
             self.epsilon_start = checkpoint.get('epsilon_start', self.epsilon_start)
             self.epsilon_end = checkpoint.get('epsilon_end', self.epsilon_end)
             self.epsilon_decay_steps = checkpoint.get('epsilon_decay_steps', self.epsilon_decay_steps)
+            self.epsilon_decay_mode = checkpoint.get('epsilon_decay_mode', 'linear')
             self.training_step = checkpoint.get('training_step', self.training_step)
             self.cumulative_reward = checkpoint.get('cumulative_reward', self.cumulative_reward)
             self.contents_list = checkpoint.get('contents_list', self.contents_list)
             self.file_to_slot = checkpoint.get('file_to_slot', self.file_to_slot)
+
             rb = checkpoint.get('replay_buffer', None)
             pr = checkpoint.get('priorities', None)
             if rb is not None and pr is not None:
-                self.replay_buffer = deque(rb, maxlen=self.replay_buffer.maxlen)
+                # Convert numpy arrays in experiences back from lists
+                converted_rb = []
+                for exp in rb:
+                    converted_exp = exp.copy()
+                    if isinstance(exp.get('state'), list):
+                        converted_exp['state'] = np.array(exp['state'], dtype=np.float32)
+                    if isinstance(exp.get('next_state'), list):
+                        converted_exp['next_state'] = np.array(exp['next_state'], dtype=np.float32)
+                    converted_rb.append(converted_exp)
+                
+                self.replay_buffer = deque(converted_rb, maxlen=self.replay_buffer.maxlen)
                 self.priorities = deque(pr, maxlen=self.priorities.maxlen)
-            self.last_state = checkpoint.get('last_state', None) ### NEW ###
-            self.last_action = checkpoint.get('last_action', None) ### NEW ###
+
+            self.last_state = checkpoint.get('last_state', None)
+            if self.last_state is not None and isinstance(self.last_state, list):
+                self.last_state = np.array(self.last_state, dtype=np.float32)
+            self.last_action = checkpoint.get('last_action', None)
+            self.reward_mean = checkpoint.get('reward_mean', self.reward_mean)
+            self.reward_std = checkpoint.get('reward_std', self.reward_std)
+            
+            reward_hist = checkpoint.get('reward_history', None)
+            if reward_hist is not None:
+                self.reward_history = deque(reward_hist, maxlen=self.reward_history.maxlen)
+
+            print(f"📌 Model loaded: {filepath}")
         else:
             with open(filepath, 'rb') as f:
                 model = pickle.load(f)
@@ -698,4 +836,4 @@ class ImprovedDQNNomaCache(CacheBase):
             self.cumulative_reward = model.get('cumulative_reward', self.cumulative_reward)
             self.contents_list = model.get('contents_list', self.contents_list)
             self.file_to_slot = model.get('file_to_slot', self.file_to_slot)
-
+            print(f"📄 Q-table model loaded: {filepath}")

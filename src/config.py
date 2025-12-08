@@ -6,103 +6,96 @@ RANDOM_SEED = 2025
 # ------------------------------
 # Content catalog
 # ------------------------------
-NUM_FILES = 2000        # total unique files in catalog (moderate scale, realistic for edge caching)
-ZIPF_ALPHA = 1.0        # Zipf skew parameter. 1.0 = strong skew, realistic traffic (few files are very popular)
+NUM_FILES = 2000        # total unique files in catalog
+ZIPF_ALPHA = 1.0        # Zipf skew parameter (1.0 = strong skew)
 
 # ------------------------------
 # Users & requests
 # ------------------------------
 NUM_USERS = 200         # number of users in the cell
-REQUESTS_PER_USER = 50  # number of requests per user (enough to get stable statistics)
+REQUESTS_PER_USER = 50  # number of requests per user
 
 # ------------------------------
 # Cache
 # ------------------------------
-CACHE_SIZE = 200        # ~10% of catalog size, realistic for small edge server / base station cache
-
-# Caching policy options: "topk", "lru", "lfu", "random"
-CACHE_POLICY = "noma_aware"  # Options: "noma_aware", "joint_opt", "multi_obj", "rl"
-
-# Effective rate when served from local cache (bits/s/Hz) — models very fast local delivery
-CACHE_DELIVERY_RATE = 10.0
-
+CACHE_SIZE = 200        # ~10% of catalog size
+CACHE_POLICY = "noma_aware"
+CACHE_DELIVERY_RATE = 10.0  # bits/s/Hz
 
 # ------------------------------
 # Novel algorithm parameters
 # ------------------------------
-NOMA_AWARE_ALPHA_POP = 0.3      # Popularity learning rate
-NOMA_AWARE_ALPHA_CHANNEL = 0.2  # Channel learning rate
-CACHE_UPDATE_INTERVAL = 100      # How often to re-optimize cache
-TIME_SLOTS = 1000               # Simulation time slots for learning
+NOMA_AWARE_ALPHA_POP = 0.3
+NOMA_AWARE_ALPHA_CHANNEL = 0.2
+CACHE_UPDATE_INTERVAL = 100
+TIME_SLOTS = 1000
 
 # ------------------------------
 # Multi-objective weights
 # ------------------------------
 MO_OBJECTIVES = ['hit_rate', 'outage', 'energy']
 MO_HIT_WEIGHT = 0.4
-MO_OUTAGE_WEIGHT = 0.4  
+MO_OUTAGE_WEIGHT = 0.4
 MO_ENERGY_WEIGHT = 0.2
-
 
 # ------------------------------
 # Monte Carlo runs
 # ------------------------------
-NUM_RUNS = 50           # repeat experiments for averaging (good statistical confidence)
+NUM_RUNS = 50
 
 # ------------------------------
 # NOMA & channel params
 # ------------------------------
-TX_POWER = 1.0               # total transmit power (linear units, normalized)
-NOISE_POWER = 1e-9           # noise power (linear)
-CELL_RADIUS = 500.0          # meters (urban small-cell range)
-PATHLOSS_EXPONENT = 3.5      # urban/suburban environment
-MIN_DISTANCE = 1.0           # minimum distance to avoid singular PL
+TX_POWER = 1.0
+NOISE_POWER = 1e-9
+CELL_RADIUS = 500.0
+PATHLOSS_EXPONENT = 3.5
+MIN_DISTANCE = 1.0
 
-PAIR_USERS = True            # enable NOMA pairing
-PAIRING_METHOD = "extreme"   # best performance: pair weakest with strongest
+PAIR_USERS = True
+PAIRING_METHOD = "extreme"
 
-# Power allocation
-POWER_COEFF_WEAK = 0.8       # fraction of power allocated to weak user (higher priority)
-POWER_COEFF_STRONG = 0.2     # remainder to strong user
+POWER_COEFF_WEAK = 0.8
+POWER_COEFF_STRONG = 0.2
 
-# SIC imperfection
-SIC_IMPERFECTION = 0.05      # realistic imperfect SIC (5% residual interference)
+SIC_IMPERFECTION = 0.05
+TARGET_RATE_BPS = 0.5
 
-# QoS requirement
-TARGET_RATE_BPS = 0.5        # target rate in bits/s/Hz per user
+POWER_ALLOC_GRID = 101
+USE_CLOSED_FORM_ALLOC = False
 
-# Power allocation method
-POWER_ALLOC_GRID = 101       # grid-search resolution for allocation
-USE_CLOSED_FORM_ALLOC = False # keep False → grid-search is more general
-
-# ========== NEW: RL-SPECIFIC PARAMETERS ==========
+# ========== RL-SPECIFIC PARAMETERS ==========
 
 # Training configuration
-RL_TRAINING_STEPS = 50000  # ⚠️ INCREASED from 1000
-RL_TRAINING_EPISODES = 10  # Number of full training episodes
+RL_TRAINING_STEPS = 50000     # Total training steps
+RL_TRAINING_EPISODES = 50     # Episodes (1000 steps each)
 RL_STEPS_PER_EPISODE = 1000
 
-# Evaluation configuration  
-RL_EVAL_REQUESTS = 5000  # Requests for evaluation phase
-RL_SEPARATE_TRAIN_EVAL = True  # Use separate training/evaluation
+# EPSILON DECAY STRATEGY (IMPORTANT!)
+# The agent will:
+# - Steps 0-25000: Explore (ε: 1.0 → 0.01) - Learn through exploration
+# - Steps 25001-50000: Exploit (ε: 0.01) - Refine learned policy
+# This is INTENTIONAL: decay over first half, then exploit learned policy
+RL_EPSILON_START = 1.0
+RL_EPSILON_END = 0.01
+RL_EPSILON_DECAY_STEPS = 25000  # Decay over first HALF of training
+RL_EVAL_EPSILON = 0.0            # No exploration during evaluation
+
+# Evaluation configuration
+RL_EVAL_REQUESTS = 5000
+RL_SEPARATE_TRAIN_EVAL = True
 
 # Neural network configuration
-RL_USE_NEURAL_NETWORK = True  # Try to use PyTorch DQN (fallback to Q-table)
-RL_HIDDEN_DIMS = [128, 64]  # Hidden layer dimensions
+RL_USE_NEURAL_NETWORK = True
+RL_HIDDEN_DIMS = [128, 64]
 RL_LEARNING_RATE = 0.001
 RL_BATCH_SIZE = 64
-RL_REPLAY_BUFFER_SIZE = 50000  # ⚠️ INCREASED from 2000
-
-# Exploration configuration
-RL_EPSILON_START = 1.0  # Start with full exploration
-RL_EPSILON_END = 0.01  # End with 1% exploration
-RL_EPSILON_DECAY_STEPS = 25000  # Decay over 5000 steps
-RL_EVAL_EPSILON = 0.05  # Low exploration during evaluation
+RL_REPLAY_BUFFER_SIZE = 50000
 
 # Q-learning parameters
 RL_GAMMA = 0.95  # Discount factor
-RL_TARGET_UPDATE_FREQ = 100  # Update target network every 100 steps
-RL_TRAIN_FREQUENCY = 4  # Train every 4 steps
+RL_TARGET_UPDATE_FREQ = 100
+RL_TRAIN_FREQUENCY = 4
 
 # Reward function parameters
 RL_REWARD_CACHE_HIT = 10.0
@@ -115,25 +108,21 @@ RL_BER_THRESHOLD_POOR = 1e-2
 
 # Prioritized experience replay
 RL_USE_PRIORITIZED_REPLAY = True
-RL_PRIORITY_ALPHA = 0.6  # Priority exponent
-RL_PRIORITY_BETA = 0.4  # Importance sampling weight
-
-# Cache update strategy
-CACHE_UPDATE_INTERVAL = 100  # Re-optimize cache every 100 requests
-TIME_SLOTS = 1000  # Legacy parameter for backward compatibility
+RL_PRIORITY_ALPHA = 0.6
+RL_PRIORITY_BETA = 0.4
 
 # Performance tracking
-RL_TRACK_LEARNING = True  # Track and save learning curves
-RL_SAVE_CHECKPOINTS = True  # Save model checkpoints
-RL_CHECKPOINT_FREQ = 2000  # Save every 2000 steps
+RL_TRACK_LEARNING = True
+RL_SAVE_CHECKPOINTS = True
+RL_CHECKPOINT_FREQ = 10000  # Save every 10k steps
 RL_CHECKPOINT_DIR = "./checkpoints/"
 
 # Comparison experiments
 COMPARE_POLICIES = [
-    "topk",  # Baseline 1
-    "lru",   # Baseline 2
-    "lfu",   # Baseline 3
-    "improved_dqn_noma"  # Your RL policy
+    "topk",
+    "lru",
+    "lfu",
+    "improved_dqn_noma"
 ]
 
 # Logging and visualization
@@ -165,13 +154,22 @@ def print_rl_config():
     
     config = get_rl_config()
     
+    print("\n📚 EPSILON DECAY STRATEGY:")
+    print(f"  Total Training Steps: {RL_TRAINING_STEPS}")
+    print(f"  Decay Steps: {RL_EPSILON_DECAY_STEPS}")
+    print(f"  Epsilon Range: {RL_EPSILON_START} → {RL_EPSILON_END}")
+    print(f"\n  Phase 1 (Steps 0-{RL_EPSILON_DECAY_STEPS}):")
+    print(f"    Exploration: ε decays from {RL_EPSILON_START} to {RL_EPSILON_END}")
+    print(f"    Purpose: Learn from diverse experiences")
+    print(f"\n  Phase 2 (Steps {RL_EPSILON_DECAY_STEPS}-{RL_TRAINING_STEPS}):")
+    print(f"    Exploitation: ε stays at {RL_EPSILON_END}")
+    print(f"    Purpose: Refine learned policy")
+    
     categories = {
-        'Training': ['TRAINING_STEPS', 'TRAINING_EPISODES', 'STEPS_PER_EPISODE'],
+        'Training': ['TRAINING_STEPS', 'BATCH_SIZE', 'LEARNING_RATE'],
         'Evaluation': ['EVAL_REQUESTS', 'SEPARATE_TRAIN_EVAL', 'EVAL_EPSILON'],
-        'Neural Network': ['USE_NEURAL_NETWORK', 'HIDDEN_DIMS', 'LEARNING_RATE', 'BATCH_SIZE'],
-        'Exploration': ['EPSILON_START', 'EPSILON_END', 'EPSILON_DECAY_STEPS'],
-        'Q-Learning': ['GAMMA', 'TARGET_UPDATE_FREQ', 'TRAIN_FREQUENCY'],
-        'Rewards': ['REWARD_CACHE_HIT', 'REWARD_CACHE_MISS_SUCCESS', 'REWARD_OUTAGE']
+        'Neural Network': ['USE_NEURAL_NETWORK', 'HIDDEN_DIMS'],
+        'Q-Learning': ['GAMMA', 'REPLAY_BUFFER_SIZE'],
     }
     
     for category, params in categories.items():
@@ -186,3 +184,5 @@ def print_rl_config():
 
 if __name__ == "__main__":
     print_rl_config()
+
+    
