@@ -375,20 +375,6 @@ class NOMACachingSimulator:
         strong_cached = cache.is_hit(strong_file, update_stats=False)
         
         # ✅ BUG FIX #1: Correct allocate_power() call
-        # OLD (WRONG):
-        # p_weak, p_strong, feasible, _ = allocate_power(
-        #     gain_w=gain_w,
-        #     gain_s=gain_s,
-        #     method=self.cfg.POWER_ALLOC_METHOD,
-        #     target_sinr=sinr_threshold,  # ❌ Wrong!
-        #     P_tx=self.cfg.TX_POWER,      # ❌ Wrong!
-        #     noise=self.cfg.NOISE_POWER,  # ❌ Wrong!
-        #     weak_cached=weak_cached,
-        #     strong_cached=strong_cached,
-        #     grid_points=self.cfg.POWER_ALLOC_GRID
-        # )
-        
-        # NEW (CORRECT):
         p_weak, p_strong, feasible, _ = allocate_power(
             gain_w=gain_w,
             gain_s=gain_s,
@@ -464,22 +450,32 @@ class NOMACachingSimulator:
         if strong_success:
             self.metrics['strong_user_successes'] += 1
         
+        # ✅ BUG FIX #2: Correct outage counting (no double-counting)
+        # Count transmission outcome
         if weak_success and strong_success:
             self.metrics['both_success'] += 1
             self.metrics['noma_successes'] += 1
+            # No outages
         elif weak_success or strong_success:
             self.metrics['partial_success'] += 1
             self.metrics['noma_successes'] += 1
+            # One outage (either weak or strong)
+            if not weak_success:
+                self.metrics['outages'] += 1
+            if not strong_success:
+                self.metrics['outages'] += 1
         else:
             self.metrics['both_fail'] += 1
             self.metrics['noma_failures'] += 1
-            self.metrics['outages'] += 2  # Both users in outage
+            # Both users in outage
+            self.metrics['outages'] += 2
         
-        # ⚠️ NOTE: Bug #2 (double-counting) still exists below - will fix next
-        if not weak_success:
-            self.metrics['outages'] += 1
-        if not strong_success:
-            self.metrics['outages'] += 1
+        # ❌ REMOVED: Double-counting bug (was counting outages twice!)
+        # OLD (WRONG) CODE:
+        # if not weak_success:
+        #     self.metrics['outages'] += 1
+        # if not strong_success:
+        #     self.metrics['outages'] += 1
         
         # Throughput
         self.metrics['total_throughput'] += sic_results['sum_rate']
