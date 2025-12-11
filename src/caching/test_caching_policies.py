@@ -511,7 +511,8 @@ def test_dqn_specific(results: TestResults):
         outage=False
     )
     
-    results.assert_true('cache_hit' in result, "DQN request returns cache_hit")
+    # FIX: DQN request() returns 'hit' key (from CacheBase), not 'cache_hit'
+    results.assert_true('hit' in result, "DQN request returns hit status")
     results.assert_true('cic_enabled' in result, "DQN tracks CIC")
     
     # Check NOMA-specific stats
