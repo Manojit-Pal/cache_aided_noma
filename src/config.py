@@ -3,6 +3,7 @@
 Simulation configuration parameters (optimized for Stable DQN Cache).
 
 ✅ UPDATED: Optimized parameters for the new stable DQN implementation
+✅ ADDED: Complete NOMA channel modeling and cache-aware parameters
 """
 
 # Random seed for reproducibility
@@ -57,17 +58,36 @@ CELL_RADIUS = 500.0
 PATHLOSS_EXPONENT = 3.5
 MIN_DISTANCE = 1.0
 
+# User pairing
 PAIR_USERS = True
-PAIRING_METHOD = "extreme"
+PAIRING_METHOD = "extreme"  # Options: 'extreme', 'random', 'sequential'
 
+# Power allocation
 POWER_COEFF_WEAK = 0.8
 POWER_COEFF_STRONG = 0.2
-
-SIC_IMPERFECTION = 0.05
-TARGET_RATE_BPS = 0.5
-
+POWER_ALLOC_METHOD = "cache_aware"  # ✅ NEW: Options: 'gridsearch', 'closedform', 'cache_aware', 'sumrate_max', 'energy_efficient'
 POWER_ALLOC_GRID = 101
-USE_CLOSED_FORM_ALLOC = False
+USE_CLOSED_FORM_ALLOC = False  # ✅ DEPRECATED: Use POWER_ALLOC_METHOD instead
+
+# SIC parameters
+SIC_IMPERFECTION = 0.05  # Residual interference factor (ζ)
+TARGET_RATE_BPS = 0.5    # Target data rate in bps/Hz
+
+# ✅ NEW: Channel modeling parameters (6G features)
+FADING_TYPE = "mixed"     # Options: 'rayleigh', 'rician', 'mixed'
+RICIAN_K_FACTOR_DB = 10.0 # Rician K-factor in dB (for LoS scenarios)
+LOS_PROBABILITY = 0.4     # Probability of Line-of-Sight (for mixed fading)
+ENABLE_MOBILITY = False   # Enable time-varying channels
+DOPPLER_FREQ = 10.0      # Doppler frequency in Hz (if mobility enabled)
+
+# ✅ NEW: Cache-aware NOMA parameters
+ENABLE_CIC = True         # Enable Cache-aided Interference Cancellation
+CIC_PERFECT = True        # Perfect CIC (residual=0) vs imperfect
+CACHE_HIT_ENABLES_CIC = True  # Whether cache hits enable CIC for paired users
+
+# ✅ NEW: Performance thresholds
+BER_THRESHOLD = 1e-3      # Maximum acceptable BER
+OUTAGE_SINR_MARGIN = 2.0  # SINR margin above threshold (dB)
 
 
 # ============================================================================
@@ -280,6 +300,34 @@ def set_conservative_learning_config():
 # HELPER FUNCTIONS
 # ============================================================================
 
+def get_noma_config():
+    """Return NOMA-specific configuration as dictionary."""
+    import sys
+    module = sys.modules[__name__]
+    
+    noma_params = {
+        'TX_POWER': TX_POWER,
+        'NOISE_POWER': NOISE_POWER,
+        'CELL_RADIUS': CELL_RADIUS,
+        'PATHLOSS_EXPONENT': PATHLOSS_EXPONENT,
+        'MIN_DISTANCE': MIN_DISTANCE,
+        'PAIR_USERS': PAIR_USERS,
+        'PAIRING_METHOD': PAIRING_METHOD,
+        'POWER_COEFF_WEAK': POWER_COEFF_WEAK,
+        'POWER_COEFF_STRONG': POWER_COEFF_STRONG,
+        'POWER_ALLOC_METHOD': POWER_ALLOC_METHOD,
+        'SIC_IMPERFECTION': SIC_IMPERFECTION,
+        'TARGET_RATE_BPS': TARGET_RATE_BPS,
+        'FADING_TYPE': FADING_TYPE,
+        'RICIAN_K_FACTOR_DB': RICIAN_K_FACTOR_DB,
+        'LOS_PROBABILITY': LOS_PROBABILITY,
+        'ENABLE_CIC': ENABLE_CIC,
+        'CIC_PERFECT': CIC_PERFECT,
+    }
+    
+    return noma_params
+
+
 def get_rl_config():
     """Return RL-specific configuration as dictionary."""
     import sys
@@ -293,13 +341,49 @@ def get_rl_config():
     return rl_params
 
 
+def print_noma_config():
+    """Print NOMA configuration for verification."""
+    print("\n" + "="*70)
+    print("NOMA SYSTEM CONFIGURATION")
+    print("="*70)
+    
+    print("\n📡 CHANNEL PARAMETERS:")
+    print(f"  TX Power: {TX_POWER}W")
+    print(f"  Noise Power: {NOISE_POWER}W")
+    print(f"  Cell Radius: {CELL_RADIUS}m")
+    print(f"  Path Loss Exponent: {PATHLOSS_EXPONENT}")
+    print(f"  Fading Type: {FADING_TYPE}")
+    if FADING_TYPE in ['rician', 'mixed']:
+        print(f"  Rician K-factor: {RICIAN_K_FACTOR_DB} dB")
+    if FADING_TYPE == 'mixed':
+        print(f"  LoS Probability: {LOS_PROBABILITY}")
+    
+    print("\n👥 USER PAIRING:")
+    print(f"  Method: {PAIRING_METHOD}")
+    print(f"  Number of Users: {NUM_USERS}")
+    
+    print("\n⚡ POWER ALLOCATION:")
+    print(f"  Method: {POWER_ALLOC_METHOD}")
+    print(f"  Default p_weak: {POWER_COEFF_WEAK}")
+    print(f"  Default p_strong: {POWER_COEFF_STRONG}")
+    
+    print("\n🔄 SIC PARAMETERS:")
+    print(f"  Imperfection Factor: {SIC_IMPERFECTION}")
+    print(f"  Target Rate: {TARGET_RATE_BPS} bps/Hz")
+    
+    print("\n💾 CACHE-AIDED FEATURES:")
+    print(f"  CIC Enabled: {ENABLE_CIC}")
+    print(f"  Perfect CIC: {CIC_PERFECT}")
+    print(f"  Cache Size: {CACHE_SIZE}")
+    
+    print("\n" + "="*70 + "\n")
+
+
 def print_rl_config():
     """Print RL configuration for verification."""
     print("\n" + "="*70)
     print("STABLE DQN CACHE CONFIGURATION")
     print("="*70)
-    
-    config = get_rl_config()
     
     print("\n📚 TRAINING STRATEGY:")
     print(f"  Total Training Steps: {RL_TRAINING_STEPS}")
@@ -362,6 +446,22 @@ def validate_config():
     if RL_TRAINING_STEPS != RL_TRAINING_EPISODES * RL_STEPS_PER_EPISODE:
         issues.append(f"RL_TRAINING_STEPS ({RL_TRAINING_STEPS}) != EPISODES × STEPS_PER_EPISODE ({RL_TRAINING_EPISODES} × {RL_STEPS_PER_EPISODE})")
     
+    # ✅ NEW: NOMA parameter validation
+    if not (0 < POWER_COEFF_WEAK < 1):
+        issues.append(f"POWER_COEFF_WEAK ({POWER_COEFF_WEAK}) must be between 0 and 1")
+    
+    if not (0 < POWER_COEFF_STRONG < 1):
+        issues.append(f"POWER_COEFF_STRONG ({POWER_COEFF_STRONG}) must be between 0 and 1")
+    
+    if abs(POWER_COEFF_WEAK + POWER_COEFF_STRONG - 1.0) > 1e-6:
+        issues.append(f"POWER_COEFF_WEAK + POWER_COEFF_STRONG must equal 1.0")
+    
+    if FADING_TYPE not in ['rayleigh', 'rician', 'mixed']:
+        issues.append(f"FADING_TYPE must be 'rayleigh', 'rician', or 'mixed' (got '{FADING_TYPE}')")
+    
+    if PAIRING_METHOD not in ['extreme', 'random', 'sequential']:
+        issues.append(f"PAIRING_METHOD must be 'extreme', 'random', or 'sequential' (got '{PAIRING_METHOD}')")
+    
     if issues:
         print("⚠️  Configuration Issues Found:")
         for issue in issues:
@@ -377,12 +477,9 @@ def validate_config():
 # ============================================================================
 
 if __name__ == "__main__":
+    print_noma_config()
     print_rl_config()
     validate_config()
 else:
     # Auto-validate when imported
     validate_config()
-
-
-
-    
