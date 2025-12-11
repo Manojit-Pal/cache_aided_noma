@@ -374,17 +374,29 @@ class NOMACachingSimulator:
         weak_cached = cache.is_hit(weak_file, update_stats=False)
         strong_cached = cache.is_hit(strong_file, update_stats=False)
         
-        # Allocate power (cache-aware if configured)
+        # ✅ BUG FIX #1: Correct allocate_power() call
+        # OLD (WRONG):
+        # p_weak, p_strong, feasible, _ = allocate_power(
+        #     gain_w=gain_w,
+        #     gain_s=gain_s,
+        #     method=self.cfg.POWER_ALLOC_METHOD,
+        #     target_sinr=sinr_threshold,  # ❌ Wrong!
+        #     P_tx=self.cfg.TX_POWER,      # ❌ Wrong!
+        #     noise=self.cfg.NOISE_POWER,  # ❌ Wrong!
+        #     weak_cached=weak_cached,
+        #     strong_cached=strong_cached,
+        #     grid_points=self.cfg.POWER_ALLOC_GRID
+        # )
+        
+        # NEW (CORRECT):
         p_weak, p_strong, feasible, _ = allocate_power(
             gain_w=gain_w,
             gain_s=gain_s,
+            cfg=self.cfg,  # ✅ Pass cfg object (contains all params)
             method=self.cfg.POWER_ALLOC_METHOD,
-            target_sinr=sinr_threshold,
-            P_tx=self.cfg.TX_POWER,
-            noise=self.cfg.NOISE_POWER,
             weak_cached=weak_cached,
             strong_cached=strong_cached,
-            grid_points=self.cfg.POWER_ALLOC_GRID
+            grid_points=self.cfg.POWER_ALLOC_GRID  # For gridsearch method
         )
         
         # ========================================================================
@@ -463,6 +475,7 @@ class NOMACachingSimulator:
             self.metrics['noma_failures'] += 1
             self.metrics['outages'] += 2  # Both users in outage
         
+        # ⚠️ NOTE: Bug #2 (double-counting) still exists below - will fix next
         if not weak_success:
             self.metrics['outages'] += 1
         if not strong_success:
@@ -680,7 +693,7 @@ def run_baseline_comparison(cfg, num_runs: int = None) -> pd.DataFrame:
     return pd.DataFrame(all_results)
 
 
-def run_dqn_training(cfg, episodes: int = None) -> Tuple[DQNCache, pd.DataFrame]:
+def run_dqn_training(cfg, episodes: int = None):
     """
     Train DQN cache and evaluate performance over time.
     
