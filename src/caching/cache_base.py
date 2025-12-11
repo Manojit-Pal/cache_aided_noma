@@ -230,7 +230,8 @@ class CacheBase(ABC):
     
     def request(self, item: int, user_id: Optional[int] = None,
                 channel_gain: Optional[float] = None,
-                paired_user: Optional[int] = None) -> Dict:
+                paired_user: Optional[int] = None,
+                paired_file: Optional[int] = None) -> Dict:
         """
         Unified request interface that handles both hit detection and NOMA integration.
         
@@ -242,34 +243,63 @@ class CacheBase(ABC):
             user_id: ID of requesting user
             channel_gain: User's channel gain (for NOMA-aware caching)
             paired_user: ID of NOMA paired user (if any)
+            paired_file: File ID requested by paired user (for CIC detection)
         
         Returns:
             Dict containing:
                 - 'hit': bool - whether request was a cache hit
                 - 'cic_enabled': bool - whether CIC can be applied
-                - 'paired_user_cached': bool - whether paired user has content
+                - 'paired_user_cached': bool - whether paired user's file is cached
+                - 'weak_user_benefit': bool - weak user can use CIC
+                - 'strong_user_benefit': bool - strong user gets perfect SIC
         
         Example:
-            >>> result = cache.request(file_id=5, user_id=10, 
-            ...                       paired_user=20, channel_gain=1e-7)
+            >>> # User 10 (weak) requests file 5, paired with user 20 (strong) requesting file 8
+            >>> result = cache.request(item=5, user_id=10, 
+            ...                       paired_user=20, paired_file=8,
+            ...                       channel_gain=1e-7)
             >>> if result['hit']:
             ...     delivery_rate = config.CACHE_DELIVERY_RATE
-            >>> elif result['cic_enabled']:
-            ...     # Use NOMA with CIC (better SINR)
-            ...     pass
+            >>> elif result['weak_user_benefit']:
+            ...     # Use NOMA with CIC (weak user can cancel strong's interference)
+            ...     sinr = sinr_weak_user_with_cache(...)
         """
-        # Check if item is cached
+        # Check if requested item is cached
         hit = self.is_hit(item, update_stats=True)
         
-        # Check if CIC can be enabled (paired user has this content)
-        cic_enabled = False
-        paired_user_cached = False
+        # Initialize result
+        result = {
+            'hit': hit,
+            'cic_enabled': False,
+            'paired_user_cached': False,
+            'weak_user_benefit': False,
+            'strong_user_benefit': False,
+            'cache_size': len(self),
+        }
         
-        if self.enable_noma_awareness and paired_user is not None:
-            # Check if paired user has this item (enables CIC for them)
-            paired_user_cached = hit  # If we have it, they benefit from CIC
-            if paired_user_cached:
+        if not self.enable_noma_awareness:
+            return result
+        
+        # NOMA-aware processing
+        if paired_user is not None and paired_file is not None:
+            # Check if paired user's file is cached
+            paired_cached = self.is_hit(paired_file, update_stats=False)
+            result['paired_user_cached'] = paired_cached
+            
+            # Determine who benefits from CIC
+            # Convention: user_id is weak, paired_user is strong (from extreme pairing)
+            
+            if paired_cached:
+                # Weak user can cancel strong user's interference!
+                result['weak_user_benefit'] = True
+                result['cic_enabled'] = True
                 self.cic_opportunities += 1
+            
+            if hit:
+                # Strong user can cancel weak user's interference (perfect SIC)
+                result['strong_user_benefit'] = True
+                result['cic_enabled'] = True
+                self.noma_paired_hits += 1
         
         # Store channel gain if provided (for NOMA-aware policies)
         if user_id is not None and channel_gain is not None:
@@ -279,15 +309,10 @@ class CacheBase(ABC):
         if user_id is not None and paired_user is not None:
             self.user_pairings[user_id] = paired_user
         
-        return {
-            'hit': hit,
-            'cic_enabled': paired_user_cached,
-            'paired_user_cached': paired_user_cached,
-            'cache_size': len(self),
-        }
+        return result
     
     def check_cic_benefit(self, user_id: int, requested_file: int, 
-                         paired_user: int) -> Tuple[bool, bool]:
+                         paired_user: int, paired_file: Optional[int] = None) -> Tuple[bool, bool]:
         """
         Check CIC benefits for NOMA user pair.
         
@@ -295,6 +320,7 @@ class CacheBase(ABC):
             user_id: ID of requesting user
             requested_file: File requested by user
             paired_user: ID of NOMA paired user
+            paired_file: File requested by paired user (optional)
         
         Returns:
             Tuple of (user_gets_cic, paired_gets_cic):
@@ -303,7 +329,7 @@ class CacheBase(ABC):
         
         Example:
             >>> # User 1 requests file 5, paired with user 2 (requesting file 8)
-            >>> user_cic, paired_cic = cache.check_cic_benefit(1, 5, 2)
+            >>> user_cic, paired_cic = cache.check_cic_benefit(1, 5, 2, 8)
             >>> # user_cic: True if cache has file 8 (user 1 cancels user 2's interference)
             >>> # paired_cic: True if cache has file 5 (user 2 cancels user 1's interference)
         """
@@ -311,7 +337,8 @@ class CacheBase(ABC):
         paired_gets_cic = False
         
         # User can cancel paired user's interference if paired user's file is cached
-        # (We'd need to know what paired user requested - this is simplified)
+        if paired_file is not None:
+            user_gets_cic = self.is_hit(paired_file, update_stats=False)
         
         # Paired user can cancel this user's interference if this file is cached
         paired_gets_cic = self.is_hit(requested_file, update_stats=False)
