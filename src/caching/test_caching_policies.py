@@ -484,7 +484,7 @@ def test_dqn_specific(results: TestResults):
     results.assert_true('training_step' in stats, "Training step in stats")
     results.assert_true('epsilon' in stats, "Epsilon in stats")
     results.assert_true('avg_loss' in stats, "Avg loss in stats")
-    results.assert_true('cumulative_reward' in stats, "Cumulative reward in stats")
+    results.assert_true('avg_episode_reward' in stats, "Avg episode reward in stats")
     results.assert_true('replay_buffer_size' in stats, "Replay buffer size in stats")
     
     results.assert_greater(stats['training_step'], 0, "Training occurred")
@@ -492,8 +492,12 @@ def test_dqn_specific(results: TestResults):
     
     print(f"    Training steps: {stats['training_step']}")
     print(f"    Epsilon: {stats['epsilon']:.4f}")
-    print(f"    Cumulative reward: {stats['cumulative_reward']:.2f}")
+    print(f"    Avg episode reward: {stats['avg_episode_reward']:.2f}")
+    print(f"    Avg loss: {stats['avg_loss']:.6f}")
     print(f"    Replay buffer size: {stats['replay_buffer_size']}")
+    
+    if 'per_beta' in stats:
+        print(f"    PER beta (current): {stats['per_beta']:.4f}")
     
     print("\n[8.5] DQN NOMA Integration")
     # Test with NOMA-specific rewards
@@ -509,6 +513,11 @@ def test_dqn_specific(results: TestResults):
     
     results.assert_true('cache_hit' in result, "DQN request returns cache_hit")
     results.assert_true('cic_enabled' in result, "DQN tracks CIC")
+    
+    # Check NOMA-specific stats
+    stats = dqn.get_stats()
+    results.assert_true('cic_count' in stats, "DQN tracks CIC count")
+    results.assert_true('sic_count' in stats, "DQN tracks SIC count")
     
     print("\n[8.6] DQN Epsilon Decay")
     # Make many more requests to see epsilon decay
