@@ -8,6 +8,7 @@ Tests all caching policies for:
 3. Channel awareness (eviction, weighting)
 4. Statistics and analytics
 5. Integration with cache_base
+6. DQN-specific features (learning, epsilon decay, rewards)
 
 Usage:
     python src/caching/test_caching_policies.py
@@ -34,6 +35,13 @@ from caching import (
 )
 import numpy as np
 
+# Try to import DQN cache
+try:
+    from caching import DQNCache
+    HAS_DQN = True
+except ImportError:
+    HAS_DQN = False
+
 
 class TestResults:
     """Track test results."""
@@ -54,6 +62,10 @@ class TestResults:
     def assert_equal(self, actual, expected, message):
         self.assert_true(actual == expected, 
                         f"{message} (expected {expected}, got {actual})")
+    
+    def assert_greater(self, actual, threshold, message):
+        self.assert_true(actual > threshold,
+                        f"{message} (expected > {threshold}, got {actual})")
     
     def summary(self):
         total = self.passed + self.failed
@@ -118,11 +130,6 @@ def test_basic_functionality(results: TestResults):
     
     results.assert_equal(len(lfu), 3, "LFU size at capacity")
     results.assert_true(1 in lfu, "High frequency item kept")
-    # FIX: After is_hit(1) twice, counter should be 2, but the second is_hit increments it
-    # First is_hit(1): miss, counter[1] = 1
-    # Second is_hit(1): hit, counter[1] += 1 = 2
-    # But we check "1 in lfu" which calls is_hit(1, update_stats=False) which also increments!
-    # Actually no - update_stats=False should not increment. Let's check the actual value.
     results.assert_true(lfu.counter[1] >= 2, "Frequency counter works")
     
     # Test RandomCache
@@ -208,12 +215,6 @@ def test_channel_awareness(results: TestResults):
     results.assert_true(4 in cache, "Weak user file 4 prioritized")
     
     print("\n[3.2] LRU - Channel-Aware Eviction")
-    lru = LRUCache(capacity=3, channel_aware_eviction=True)
-    
-    # FIX: Channel-aware eviction considers LRU candidates (first 30%)
-    # With capacity=3, candidates = max(1, 3//3) = 1 (only oldest file)
-    # So it will still evict oldest, unless we have more items
-    # Let's use capacity=10 to see channel-aware effect
     lru = LRUCache(capacity=10, channel_aware_eviction=True)
     
     # Add 10 files with alternating channel gains
@@ -226,7 +227,6 @@ def test_channel_awareness(results: TestResults):
     
     # Check that weak user files (odd numbers) are more likely to be kept
     weak_files_kept = sum(1 for i in range(1, 11, 2) if i in lru)
-    strong_files_kept = sum(1 for i in range(2, 11, 2) if i not in lru)
     
     results.assert_true(
         weak_files_kept >= 3,  # At least 3 weak files should be kept
@@ -235,10 +235,6 @@ def test_channel_awareness(results: TestResults):
     
     print("\n[3.3] LFU - Channel-Weighted Frequency")
     lfu = LFUCache(capacity=3, channel_weighted_frequency=True)
-    
-    # FIX: Need to understand the weighted counter calculation
-    # Weak user (1e-9): weight = 1/(1e-9 + 1e-9) ≈ 5e8
-    # Strong user (1e-6): weight = 1/(1e-6 + 1e-9) ≈ 1e6
     
     # Weak user requests file 1 once
     lfu.request(item=1, channel_gain=1e-9)
@@ -253,9 +249,8 @@ def test_channel_awareness(results: TestResults):
     print(f"    Weak user weight: {weak_weight:.2e}, Strong user weight: {strong_weight:.2e}")
     
     # The weighted counter should favor weak users
-    # Even 1 weak user request should have high weight
     results.assert_true(
-        weak_weight > 1e5,  # Should be around 1e9
+        weak_weight > 1e5,
         f"Weak user file has high weighted frequency ({weak_weight:.2e})"
     )
 
@@ -323,9 +318,6 @@ def test_helper_functions(results: TestResults):
     results.assert_equal(cic_matrix.shape, (2, 2), "CIC matrix shape correct")
     results.assert_true(cic_matrix[0, 0], "Pair 1 weak gets CIC (file 2 cached)")
     results.assert_true(cic_matrix[0, 1], "Pair 1 strong gets CIC (file 1 cached)")
-    # FIX: Pair 2 - weak requests 10 (not cached), strong requests 3 (cached)
-    # cic_matrix[1, 0] = weak gets CIC if strong's file (3) is cached = True
-    # cic_matrix[1, 1] = strong gets CIC if weak's file (10) is cached = False
     results.assert_true(cic_matrix[1, 0], "Pair 2 weak gets CIC (file 3 cached)")
     results.assert_true(not cic_matrix[1, 1], "Pair 2 strong no CIC (file 10 not cached)")
 
@@ -360,6 +352,17 @@ def test_factory_function(results: TestResults):
         results.assert_true(False, "Should raise ValueError for invalid policy")
     except ValueError:
         results.assert_true(True, "ValueError raised for invalid policy")
+    
+    # Test DQN if available
+    if HAS_DQN:
+        print("\n[6.4] Create DQN Cache")
+        try:
+            dqn = create_cache('dqn', capacity=10, num_files=100, num_users=10)
+            results.assert_true(isinstance(dqn, DQNCache), "Create DQN cache via factory")
+        except Exception as e:
+            results.assert_true(False, f"DQN factory creation failed: {e}")
+    else:
+        print("\n[6.4] DQN Cache - ⚠️  Not Available (skipped)")
 
 
 def test_integration(results: TestResults):
@@ -375,6 +378,10 @@ def test_integration(results: TestResults):
         LFUCache(10),
         RandomCache(10)
     ]
+    
+    # Add DQN if available
+    if HAS_DQN:
+        policies.append(DQNCache(capacity=10, num_files=100, num_users=10))
     
     for cache in policies:
         results.assert_true(
@@ -408,7 +415,6 @@ def test_integration(results: TestResults):
     print("\n[7.4] All Policies Can Be Cleared")
     for cache in policies:
         cache.populate([1, 2, 3])
-        initial_size = len(cache)
         cache.clear()
         results.assert_equal(
             len(cache), 0,
@@ -416,11 +422,129 @@ def test_integration(results: TestResults):
         )
 
 
+def test_dqn_specific(results: TestResults):
+    """Test DQN-specific features."""
+    print("\n" + "="*70)
+    print("TEST 8: DQN-Specific Features")
+    print("="*70)
+    
+    if not HAS_DQN:
+        print("\n⚠️  DQNCache not available - skipping DQN tests")
+        print("   (This is expected if dqn_cache_final.py is not present)")
+        return
+    
+    print("\n[8.1] DQN Initialization")
+    try:
+        dqn = DQNCache(
+            capacity=5,
+            num_files=50,
+            num_users=10,
+            learning_rate=0.001,
+            gamma=0.95,
+            epsilon_start=1.0,
+            epsilon_end=0.1,
+            epsilon_decay_steps=1000,
+            batch_size=32,
+            seed=42
+        )
+        results.assert_true(True, "DQN cache initialized successfully")
+        results.assert_equal(len(dqn), 0, "DQN cache starts empty")
+    except Exception as e:
+        results.assert_true(False, f"DQN initialization failed: {e}")
+        return
+    
+    print("\n[8.2] DQN Populate")
+    dqn.populate(range(5))
+    results.assert_equal(len(dqn), 5, "DQN cache populated correctly")
+    results.assert_true(0 in dqn, "File 0 in cache after populate")
+    results.assert_true(4 in dqn, "File 4 in cache after populate")
+    
+    print("\n[8.3] DQN Learning - Basic Requests")
+    initial_epsilon = dqn.epsilon
+    initial_step = dqn.training_step
+    
+    # Make some requests to trigger learning
+    for i in range(100):
+        file_id = i % 50
+        user_id = i % 10
+        result = dqn.request(
+            item=file_id,
+            user_id=user_id,
+            channel_gain=0.5 + 0.5 * np.random.random(),
+            noma_success=True,
+            outage=False
+        )
+    
+    results.assert_true(dqn.training_step > initial_step, "Training steps incremented")
+    results.assert_true(dqn.epsilon <= initial_epsilon, "Epsilon decayed")
+    
+    print("\n[8.4] DQN Statistics")
+    stats = dqn.get_stats()
+    
+    results.assert_true('training_step' in stats, "Training step in stats")
+    results.assert_true('epsilon' in stats, "Epsilon in stats")
+    results.assert_true('avg_loss' in stats, "Avg loss in stats")
+    results.assert_true('cumulative_reward' in stats, "Cumulative reward in stats")
+    results.assert_true('replay_buffer_size' in stats, "Replay buffer size in stats")
+    
+    results.assert_greater(stats['training_step'], 0, "Training occurred")
+    results.assert_greater(stats['replay_buffer_size'], 0, "Replay buffer populated")
+    
+    print(f"    Training steps: {stats['training_step']}")
+    print(f"    Epsilon: {stats['epsilon']:.4f}")
+    print(f"    Cumulative reward: {stats['cumulative_reward']:.2f}")
+    print(f"    Replay buffer size: {stats['replay_buffer_size']}")
+    
+    print("\n[8.5] DQN NOMA Integration")
+    # Test with NOMA-specific rewards
+    result = dqn.request(
+        item=1,
+        user_id=5,
+        channel_gain=1e-8,  # Weak user
+        paired_user=7,
+        paired_file=10,
+        noma_success=True,
+        outage=False
+    )
+    
+    results.assert_true('cache_hit' in result, "DQN request returns cache_hit")
+    results.assert_true('cic_enabled' in result, "DQN tracks CIC")
+    
+    print("\n[8.6] DQN Epsilon Decay")
+    # Make many more requests to see epsilon decay
+    for i in range(500):
+        dqn.request(
+            item=i % 50,
+            user_id=i % 10,
+            channel_gain=0.5,
+            noma_success=True,
+            outage=False
+        )
+    
+    final_epsilon = dqn.epsilon
+    results.assert_true(
+        final_epsilon < initial_epsilon,
+        f"Epsilon decreased from {initial_epsilon:.4f} to {final_epsilon:.4f}"
+    )
+    
+    print("\n[8.7] DQN Clear")
+    dqn.clear()
+    results.assert_equal(len(dqn), 0, "DQN cache cleared")
+    results.assert_equal(dqn.total_requests, 0, "DQN stats reset")
+    # Note: training_step and epsilon should NOT reset (agent keeps learning)
+    results.assert_greater(dqn.training_step, 0, "Training step preserved after clear")
+
+
 def run_all_tests():
     """Run all test suites."""
     print("\n" + "#"*70)
     print("#" + " "*20 + "CACHING POLICIES TEST SUITE" + " "*21 + "#")
     print("#"*70)
+    
+    if HAS_DQN:
+        print("\n✅ DQNCache available - full test suite will run")
+    else:
+        print("\n⚠️  DQNCache not available - DQN tests will be skipped")
     
     results = TestResults()
     
@@ -432,6 +556,7 @@ def run_all_tests():
         test_helper_functions(results)
         test_factory_function(results)
         test_integration(results)
+        test_dqn_specific(results)  # NEW: DQN tests
         
     except Exception as e:
         print(f"\n❌ CRITICAL ERROR: {e}")
