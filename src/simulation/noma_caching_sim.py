@@ -220,9 +220,10 @@ class NOMACachingSimulator:
         )
         
         # Compute channel gains
+        # ✅ BUG FIX #4: Correct parameter name 'exponent' (not 'pathloss_exponent')
         channel_gains = compute_channel_gains(
             user_positions,
-            pathloss_exponent=self.cfg.PATHLOSS_EXPONENT,
+            exponent=self.cfg.PATHLOSS_EXPONENT,  # ✅ Changed from 'pathloss_exponent'
             fading_type=self.cfg.FADING_TYPE,
             rician_k_db=self.cfg.RICIAN_K_FACTOR_DB,
             los_probability=self.cfg.LOS_PROBABILITY,
