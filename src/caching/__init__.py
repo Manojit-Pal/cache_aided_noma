@@ -37,12 +37,6 @@ try:
 except ImportError:
     HAS_DQN = False
 
-try:
-    from .improved_dqn_noma_cache import ImprovedDQNCache
-    HAS_IMPROVED_DQN = True
-except ImportError:
-    HAS_IMPROVED_DQN = False
-
 # Define what's available when using "from caching import *"
 __all__ = [
     # Base class
@@ -68,9 +62,6 @@ __all__ = [
 if HAS_DQN:
     __all__.append('DQNCache')
 
-if HAS_IMPROVED_DQN:
-    __all__.append('ImprovedDQNCache')
-
 
 def create_cache(policy: str, capacity: int, **kwargs):
     """
@@ -83,7 +74,6 @@ def create_cache(policy: str, capacity: int, **kwargs):
             - 'lfu': Least Frequently Used
             - 'random': Random replacement
             - 'dqn' or 'stable_dqn': DQN-based cache (if available)
-            - 'improved_dqn': Improved DQN cache (if available)
         capacity: Cache capacity (number of files)
         **kwargs: Additional arguments passed to cache constructor
     
@@ -93,7 +83,7 @@ def create_cache(policy: str, capacity: int, **kwargs):
     Example:
         >>> cache = create_cache('lru', capacity=100)
         >>> cache = create_cache('topk', capacity=200, enable_noma_awareness=True)
-        >>> cache = create_cache('dqn', capacity=150, config=cfg)
+        >>> cache = create_cache('dqn', capacity=150, num_files=1000, num_users=50)
     """
     policy = policy.lower()
     
@@ -111,19 +101,18 @@ def create_cache(policy: str, capacity: int, **kwargs):
     
     elif policy in ['dqn', 'stable_dqn']:
         if not HAS_DQN:
-            raise ImportError("DQN cache not available. Check dqn_cache_final.py")
+            raise ImportError(
+                "DQN cache not available. "
+                "Ensure dqn_cache_final.py exists and PyTorch is installed."
+            )
         return DQNCache(capacity, **kwargs)
     
-    elif policy == 'improved_dqn':
-        if not HAS_IMPROVED_DQN:
-            raise ImportError("Improved DQN cache not available. Check improved_dqn_noma_cache.py")
-        return ImprovedDQNCache(capacity, **kwargs)
-    
     else:
-        raise ValueError(f"Unknown cache policy: {policy}. "
-                        f"Available: topk, lru, lfu, random" + 
-                        (", dqn" if HAS_DQN else "") +
-                        (", improved_dqn" if HAS_IMPROVED_DQN else ""))
+        available_policies = "topk, lru, lfu, random" + (", dqn" if HAS_DQN else "")
+        raise ValueError(
+            f"Unknown cache policy: '{policy}'. \n"
+            f"Available policies: {available_policies}"
+        )
 
 
 __version__ = '1.0.0'
