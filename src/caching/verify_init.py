@@ -111,24 +111,19 @@ if hasattr(caching, 'HAS_DQN'):
     if caching.HAS_DQN:
         if 'DQNCache' in caching.__all__:
             print("✅ DQNCache in __all__")
+            # Test DQN creation
+            try:
+                dqn_cache = caching.create_cache('dqn', capacity=10, 
+                                                  num_files=50, num_users=10)
+                print(f"✅ DQN cache creation works: {dqn_cache.__class__.__name__}")
+            except Exception as e:
+                print(f"❌ DQN cache creation failed: {e}")
         else:
             print("❌ DQNCache missing from __all__")
     else:
-        print("ℹ️ DQN not available (expected if not implemented yet)")
+        print("ℹ️  DQN not available (PyTorch not installed or dqn_cache_final.py missing)")
 else:
     print("❌ HAS_DQN flag missing")
-
-if hasattr(caching, 'HAS_IMPROVED_DQN'):
-    print(f"✅ HAS_IMPROVED_DQN flag: {caching.HAS_IMPROVED_DQN}")
-    if caching.HAS_IMPROVED_DQN:
-        if 'ImprovedDQNCache' in caching.__all__:
-            print("✅ ImprovedDQNCache in __all__")
-        else:
-            print("❌ ImprovedDQNCache missing from __all__")
-    else:
-        print("ℹ️ Improved DQN not available (expected if not implemented yet)")
-else:
-    print("❌ HAS_IMPROVED_DQN flag missing")
 
 # Test 9: Test helper functions
 print("\n[TEST 9] Testing helper functions...")
@@ -163,6 +158,11 @@ print("\n[TEST 10] Testing direct imports...")
 try:
     from caching import CacheBase, StaticTopKCache, LRUCache, LFUCache, RandomCache
     print("✅ All policy classes can be imported directly")
+    
+    # Test DQN if available
+    if caching.HAS_DQN:
+        from caching import DQNCache
+        print("✅ DQNCache can be imported directly")
 except Exception as e:
     print(f"❌ Direct import failed: {e}")
 
@@ -176,4 +176,6 @@ print("\nUsage examples:")
 print("  from caching import create_cache")
 print("  cache = create_cache('lru', capacity=100)")
 print("  result = cache.request(item=5, user_id=10, paired_file=8)")
+if caching.HAS_DQN:
+    print("  dqn_cache = create_cache('dqn', capacity=200, num_files=1000, num_users=50)")
 print("="*70)
