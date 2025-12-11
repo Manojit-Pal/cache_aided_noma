@@ -5,6 +5,7 @@ Simulation configuration parameters (optimized for Stable DQN Cache).
 ✅ UPDATED: Optimized parameters for the new stable DQN implementation
 ✅ ADDED: Complete NOMA channel modeling and cache-aware parameters
 ✅ BUG FIXES #1-6: All parameters updated for fixed implementation
+✅ BUG FIX #7: Added CIC-aware reward for DQN learning
 """
 
 # Random seed for reproducibility
@@ -48,7 +49,7 @@ MO_ENERGY_WEIGHT = 0.2
 # ------------------------------
 # Monte Carlo runs
 # ------------------------------
-NUM_RUNS = 10  # ✅ UPDATED: Reduced for faster testing (was 50)
+NUM_RUNS = 100  # ✅ UPDATED: Increased for DQN convergence (was 10)
 
 # ------------------------------
 # NOMA & channel params
@@ -92,7 +93,7 @@ OUTAGE_SINR_MARGIN = 2.0  # SINR margin above threshold (dB)
 
 
 # ============================================================================
-# ✅ STABLE DQN CACHE PARAMETERS (WITH BUG FIXES #1-6)
+# ✅ STABLE DQN CACHE PARAMETERS (WITH BUG FIXES #1-7)
 # ============================================================================
 
 # ------------------------------
@@ -109,7 +110,7 @@ RL_TRAINING_STEPS = 50000        # Total training steps (episodes × steps_per_e
 #           then exploit learned policy in second half
 RL_EPSILON_START = 1.0           # Start with 100% exploration
 RL_EPSILON_END = 0.01            # End with 1% exploration (never fully greedy)
-RL_EPSILON_DECAY_STEPS = 25000   # Decay over FIRST HALF of training (25k steps)
+RL_EPSILON_DECAY_STEPS = 10000   # Decay over FIRST HALF of training (25k steps)
                                  # Then stays at 0.01 for remaining 25k steps
 RL_EVAL_EPSILON = 0.0            # No exploration during evaluation
 
@@ -180,24 +181,31 @@ RL_WARM_UP_STEPS = None          # None = auto (max(10 * BATCH_SIZE, 1000) = 640
 # ------------------------------
 # Reward Function Parameters
 # ------------------------------
-# ✅ UPDATED: Balanced reward structure for stable learning
-RL_REWARD_CACHE_HIT = 10.0       # Reward for cache hit (was 50.0)
-RL_REWARD_CACHE_MISS_SUCCESS = -1.0   # Miss but NOMA succeeded
-RL_REWARD_NOMA_FAILURE = -5.0    # ✅ NEW: Miss and NOMA failed
-RL_REWARD_OUTAGE = -10.0         # Miss and outage occurred (was -5.0)
-RL_REWARD_POOR_BER = -2.0        # ✅ UPDATED: Additional penalty for high BER
-RL_REWARD_GOOD_BER = 1.0         # ✅ UPDATED: Bonus for good BER
+# ✅ BUG FIX #7: CIC-aware reward structure
+# Balanced reward structure for stable learning with CIC incentivization
+RL_REWARD_CACHE_HIT = 10.0           # Reward for cache hit (best outcome)
+RL_REWARD_CIC_ENABLED = 7.0          # ✅ NEW: Bonus for enabling CIC! (good outcome)
+RL_REWARD_CACHE_MISS_SUCCESS = -1.0  # Miss but NOMA succeeded (without CIC)
+RL_REWARD_NOMA_FAILURE = -5.0        # Miss and NOMA failed (bad outcome)
+RL_REWARD_OUTAGE = -10.0             # Miss and outage occurred (worst outcome)
+RL_REWARD_POOR_BER = -2.0            # Additional penalty for high BER
+RL_REWARD_GOOD_BER = 1.0             # Bonus for good BER
 
 # BER thresholds for reward shaping
 RL_BER_THRESHOLD_GOOD = 1e-4     # BER below this = good quality
 RL_BER_THRESHOLD_POOR = 1e-2     # BER above this = poor quality
 
 # Reward balance explanation:
-# Cache hit:       +10  (clear positive signal)
-# Miss + success:  -1   (small penalty, content delivered)
-# Miss + failure:  -5   (moderate penalty, bad outcome)
-# Outage:          -10  (worst outcome)
-# This creates 10:1 positive:negative ratio for effective learning
+# Cache hit:       +10  (best - no transmission needed)
+# CIC enabled:     +7   (✅ NEW - cache miss but CIC helps paired user!)
+# Miss + success:  -1   (acceptable - delivered via NOMA without CIC)
+# Miss + failure:  -5   (bad - poor QoS)
+# Outage:          -10  (worst - no communication)
+#
+# This structure teaches DQN to:
+# 1. Maximize cache hits (+10)
+# 2. Enable CIC when miss occurs (+7 vs -1)
+# 3. Minimize NOMA failures and outages
 
 # ------------------------------
 # ✅ BUG FIX #2 & #3: PRIORITIZED EXPERIENCE REPLAY
@@ -429,6 +437,7 @@ def print_rl_config():
     print("  ✅ #4: Soft target updates every training step")
     print("  ✅ #5: Empty slot LRU representation fixed")
     print("  ✅ #6: Warm-up period before training")
+    print("  ✅ #7: CIC-aware reward function (NEW!)")
     
     print("\n📚 TRAINING STRATEGY:")
     print(f"  Total Training Steps: {RL_TRAINING_STEPS}")
@@ -450,9 +459,10 @@ def print_rl_config():
     print(f"  Batch Size: {RL_BATCH_SIZE}")
     print(f"  Replay Buffer: {RL_REPLAY_BUFFER_SIZE}")
     
-    print("\n⚖️  REWARD STRUCTURE:")
+    print("\n⚖️  REWARD STRUCTURE (CIC-AWARE):")
     print(f"  Cache Hit: +{RL_REWARD_CACHE_HIT}")
-    print(f"  Miss + Success: {RL_REWARD_CACHE_MISS_SUCCESS}")
+    print(f"  CIC Enabled: +{RL_REWARD_CIC_ENABLED} ✅ NEW!")
+    print(f"  Miss + Success (no CIC): {RL_REWARD_CACHE_MISS_SUCCESS}")
     print(f"  Miss + Failure: {RL_REWARD_NOMA_FAILURE}")
     print(f"  Outage: {RL_REWARD_OUTAGE}")
     
@@ -544,4 +554,3 @@ if __name__ == "__main__":
 else:
     # Auto-validate when imported
     validate_config()
-

@@ -652,9 +652,12 @@ class DQNCache(CacheBase):
         
         # NOMA succeeded
         if cic_enabled:
-            reward = 2.0  # CIC helped!
+            # ✅ BUG FIX #7: Use config parameter for CIC reward
+            from .. import config
+            reward = config.RL_REWARD_CIC_ENABLED  # CIC helped! (default 7.0)
         else:
-            reward = -1.0  # Standard NOMA delivery
+            reward = -1.0  # Standard NOMA delivery (no CIC)
+
         
         # BER-based bonus/penalty
         if ber is not None:
