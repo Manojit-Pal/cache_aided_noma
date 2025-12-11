@@ -99,9 +99,9 @@ OUTAGE_SINR_MARGIN = 2.0  # SINR margin above threshold (dB)
 # ------------------------------
 # Training Configuration
 # ------------------------------
-RL_TRAINING_EPISODES = 50        # Number of training episodes
+RL_TRAINING_EPISODES = 500        # Number of training episodes
 RL_STEPS_PER_EPISODE = 1000      # Requests per episode
-RL_TRAINING_STEPS = 50000        # Total training steps (episodes × steps_per_episode)
+RL_TRAINING_STEPS = 500000        # Total training steps (episodes × steps_per_episode)
 
 # ------------------------------
 # Epsilon-Greedy Exploration
@@ -110,7 +110,7 @@ RL_TRAINING_STEPS = 50000        # Total training steps (episodes × steps_per_e
 #           then exploit learned policy in second half
 RL_EPSILON_START = 1.0           # Start with 100% exploration
 RL_EPSILON_END = 0.01            # End with 1% exploration (never fully greedy)
-RL_EPSILON_DECAY_STEPS = 10000   # Decay over FIRST HALF of training (25k steps)
+RL_EPSILON_DECAY_STEPS = 250000   # Decay over FIRST HALF of training (25k steps)
                                  # Then stays at 0.01 for remaining 25k steps
 RL_EVAL_EPSILON = 0.0            # No exploration during evaluation
 

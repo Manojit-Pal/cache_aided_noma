@@ -8,9 +8,6 @@ This script properly trains DQN cache before evaluation:
 3. Evaluate on NUM_RUNS (100) test episodes
 4. Compare with baseline policies
 
-Usage:
-    python src/simulation/train_and_evaluate_dqn.py
-
 Author: Cache-Aided NOMA Team
 Date: December 2025
 """
@@ -73,7 +70,7 @@ def train_dqn(cfg):
     
     # Training loop
     for episode in range(cfg.RL_TRAINING_EPISODES):
-        seed = cfg.RANDOM_SEED + episode * 1000  # Different seeds for training
+        seed = cfg.RANDOM_SEED + episode + 1000  # Different seeds for training
         episode_done = (episode == cfg.RL_TRAINING_EPISODES - 1)
         
         # Run training episode
@@ -130,7 +127,7 @@ def evaluate_dqn(dqn_cache, cfg, num_runs=None):
     
     for run in range(num_runs):
         # Use different seed range for evaluation
-        seed = cfg.RANDOM_SEED + 100000 + run
+        seed = cfg.RANDOM_SEED + 50000 + run
         
         # Run evaluation episode
         results = simulator.run_single_episode(dqn_cache, seed, episode_done=False)
@@ -174,7 +171,7 @@ def evaluate_baselines(cfg, num_runs=None):
         simulator = NOMACachingSimulator(cfg)
         
         for run in range(num_runs):
-            seed = cfg.RANDOM_SEED + 100000 + run  # Same seeds as DQN eval
+            seed = cfg.RANDOM_SEED + 50000 + run  # Same seeds as DQN eval
             
             results = simulator.run_single_episode(cache, seed, episode_done=False)
             results['policy'] = policy
