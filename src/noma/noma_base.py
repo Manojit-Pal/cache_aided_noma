@@ -362,35 +362,55 @@ def pair_users_sequential(channel_gains: np.ndarray, user_indices: Optional[np.n
     return pairs
 
 
-def pair_users(channel_gains: np.ndarray, method: str = 'extreme',
-               user_indices: Optional[np.ndarray] = None,
-               seed: Optional[int] = None) -> List[Tuple[int, int]]:
+# ✅ BUG FIX #6: Corrected signature to accept users list first, then channel_gains
+def pair_users(users: List[int], channel_gains: np.ndarray, 
+               method: str = 'extreme') -> Tuple[List[Tuple[int, int]], Optional[int]]:
     """
     Universal user pairing function with multiple strategies.
     
+    ✅ CORRECTED SIGNATURE: Now accepts users list first (matches simulation code)
+    
     Args:
-        channel_gains: Channel gains for all users
+        users: List of user IDs to pair (e.g., users with cache misses)
+        channel_gains: Complete channel gains array for ALL users
         method: Pairing strategy - 'extreme', 'random', or 'sequential'
-        user_indices: Optional user IDs
-        seed: Random seed (for 'random' method)
     
     Returns:
-        List of user pairs (weak_idx, strong_idx)
+        Tuple of:
+        - pairs: List of user pairs (weak_idx, strong_idx)
+        - leftover_user: User ID if odd number of users, None otherwise
     
     Example:
-        >>> gains = compute_channel_gains(positions, 3.5)
-        >>> pairs = pair_users(gains, method='extreme')
+        >>> miss_users = [0, 3, 5, 8]  # Users with cache misses
+        >>> gains = compute_channel_gains(positions, 3.5)  # All users
+        >>> pairs, leftover = pair_users(miss_users, gains, method='extreme')
         >>> for weak, strong in pairs:
         ...     simulate_noma_pair(gains[weak], gains[strong], cfg)
     """
+    num_users = len(users)
+    
+    # Handle odd number of users
+    leftover_user = None
+    if num_users % 2 == 1:
+        leftover_user = users[-1]
+        users_to_pair = users[:-1]
+    else:
+        users_to_pair = users
+    
+    # Get channel gains for only the users to pair
+    user_gains = channel_gains[users_to_pair]
+    
+    # Use appropriate pairing strategy
     if method == 'extreme':
-        return pair_users_extreme(channel_gains, user_indices)
+        pairs = pair_users_extreme(user_gains, user_indices=np.array(users_to_pair))
     elif method == 'random':
-        return pair_users_random(channel_gains, user_indices, seed)
+        pairs = pair_users_random(user_gains, user_indices=np.array(users_to_pair))
     elif method == 'sequential':
-        return pair_users_sequential(channel_gains, user_indices)
+        pairs = pair_users_sequential(user_gains, user_indices=np.array(users_to_pair))
     else:
         raise ValueError(f"Unknown pairing method: {method}. Use 'extreme', 'random', or 'sequential'.")
+    
+    return pairs, leftover_user
 
 
 # ============================================================================
@@ -439,9 +459,10 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         >>> print(f"Outage: {results['system_metrics']['outage_probability']:.2%}")
     """
     num_users = len(channel_gains)
+    all_users = list(range(num_users))
     
-    # Create user pairs
-    pairs = pair_users(channel_gains, method=pairing_method)
+    # Create user pairs (updated to use new signature)
+    pairs, leftover = pair_users(all_users, channel_gains, method=pairing_method)
     
     # Initialize cache status if not provided
     if cache_status is None:
@@ -459,14 +480,6 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         # Check cache status for CIC
         weak_cached = cache_status.get(weak_idx, False)
         strong_cached = cache_status.get(strong_idx, False)
-        
-        # Optionally: Check if they requested each other's content for CIC
-        # (Advanced CIC: weak can cancel if it has strong's requested content)
-        weak_file = requested_files.get(weak_idx, -1)
-        strong_file = requested_files.get(strong_idx, -1)
-        
-        # Simplified CIC: just check if content is generally cached
-        # For full CIC: check if weak_cached includes strong's file
         
         weak_ok, strong_ok, info = simulate_noma_pair(
             gain_w, gain_s, cfg,
@@ -632,14 +645,10 @@ if __name__ == "__main__":
     # Test 3: User pairing
     print("\n[Test 3] User pairing strategies...")
     gains = np.array([1e-8, 1e-6, 1e-9, 1e-7, 1e-10, 1e-5])
+    users = [0, 1, 2, 3, 4, 5]
     
-    pairs_extreme = pair_users(gains, method='extreme')
-    pairs_random = pair_users(gains, method='random', seed=42)
-    pairs_seq = pair_users(gains, method='sequential')
-    
-    print(f"Extreme pairing: {pairs_extreme}")
-    print(f"Random pairing: {pairs_random}")
-    print(f"Sequential pairing: {pairs_seq}")
+    pairs_extreme, leftover = pair_users(users, gains, method='extreme')
+    print(f"Extreme pairing: {pairs_extreme}, leftover: {leftover}")
     
     # Test 4: Full system simulation
     print("\n[Test 4] Full NOMA system simulation...")
