@@ -22,6 +22,10 @@ Date: December 2025
 Bug Fixes:
 - BUG #1 (CRITICAL): Fixed popularity EMA double-decay error
 - BUG #2 (CRITICAL): Added beta annealing to prioritized replay
+- BUG #3 (MODERATE): Smart sampling strategy (with/without replacement)
+- BUG #4 (MINOR): Proper soft target update every training step
+- BUG #5 (MINOR): Empty slot LRU representation fixed
+- ENHANCEMENT #6: Added warm-up period before training
 """
 
 import numpy as np
@@ -132,8 +136,9 @@ class PrioritizedReplayBuffer:
     
     Based on: Schaul et al., "Prioritized Experience Replay", ICLR 2016
     
-    Key insight: Beta should be annealed from initial value to 1.0 over training
-    to compensate for bias introduced by prioritized sampling.
+    Key insights:
+    1. Beta should be annealed from initial value to 1.0 over training
+    2. Sampling strategy: use replacement when buffer is small to avoid correlation
     """
     
     def __init__(
@@ -173,7 +178,7 @@ class PrioritizedReplayBuffer:
     
     def sample(self, batch_size: int) -> Tuple[List[Dict], np.ndarray, np.ndarray]:
         """
-        Sample batch with prioritized sampling and annealed importance sampling.
+        Sample batch with prioritized sampling and smart replacement strategy.
         
         Returns:
             experiences: List of experience dicts
@@ -199,9 +204,29 @@ class PrioritizedReplayBuffer:
         probs = priorities ** self.alpha
         probs /= probs.sum()
         
-        # Sample indices
-        indices = np.random.choice(len(self.buffer), batch_size, 
-                                  p=probs, replace=False)
+        # ========================================================================
+        # BUG FIX #3: Smart sampling strategy
+        # ========================================================================
+        # Research: "Within-minibatch without-replacement sampling is no better
+        # than with-replacement when buffer >> batch"
+        # - arXiv 2503.02269v2, "Experience Replay with Random Reshuffling"
+        #
+        # Problem: When buffer size ≈ batch size, sampling without replacement
+        # causes extreme correlation between consecutive batches
+        #
+        # Solution: Use with-replacement when buffer is relatively small
+        use_replacement = len(self.buffer) < 3 * batch_size
+        
+        try:
+            indices = np.random.choice(
+                len(self.buffer), 
+                batch_size, 
+                p=probs, 
+                replace=use_replacement
+            )
+        except ValueError:
+            # Fallback: if numerical issues with probabilities, use uniform sampling
+            indices = np.random.choice(len(self.buffer), batch_size, replace=use_replacement)
         
         # Compute importance sampling weights with current beta
         weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
@@ -263,6 +288,8 @@ class DQNCache(CacheBase):
     3. Reward = Cache hit ratio optimization (standard)
     4. Network = Dueling DQN (better value estimation)
     5. Replay = Prioritized (learn from important transitions)
+    6. Target Update = Soft update every training step (DDPG-style)
+    7. Warm-up = Wait for 10x batch_size before training
     
     **NOMA Integration:**
     
@@ -292,8 +319,8 @@ class DQNCache(CacheBase):
         # Training parameters
         batch_size: int = 64,
         replay_buffer_size: int = 50000,
-        target_update_freq: int = 1000,
         train_freq: int = 4,
+        warm_up_steps: Optional[int] = None,
         
         # Prioritized replay
         use_prioritized_replay: bool = True,
@@ -324,6 +351,16 @@ class DQNCache(CacheBase):
         self.train_freq = train_freq
         self.gradient_clip = gradient_clip
         self.tau = tau
+        
+        # ========================================================================
+        # ENHANCEMENT #6: Warm-up period before training
+        # ========================================================================
+        # Research: Most DQN implementations wait for buffer to fill
+        # before training to avoid learning from tiny, biased samples
+        if warm_up_steps is None:
+            self.warm_up_steps = max(10 * batch_size, 1000)
+        else:
+            self.warm_up_steps = warm_up_steps
         
         # Set seeds for reproducibility
         self._set_seeds(seed)
@@ -360,7 +397,6 @@ class DQNCache(CacheBase):
         # RL components
         self.use_nn = use_neural_network and TORCH_AVAILABLE
         self.training_step = 0
-        self.target_update_freq = target_update_freq
         
         # Action space: evict slot i (0 to capacity-1)
         self.action_dim = capacity
@@ -419,6 +455,7 @@ class DQNCache(CacheBase):
         print(f"   Action dim: {self.action_dim}")
         print(f"   Device: {self.device if self.use_nn else 'CPU'}")
         print(f"   NOMA-aware: {self.enable_noma_awareness}")
+        print(f"   Warm-up steps: {self.warm_up_steps}")
         if self.use_prioritized:
             print(f"   PER beta: {priority_beta_start:.2f} → {priority_beta_end:.2f} over {priority_beta_frames} frames")
     
@@ -453,19 +490,45 @@ class DQNCache(CacheBase):
         """
         state = []
         
-        # 1. LRU counters (normalize by max timestep)
-        max_lru = max(self.lru_counters.max(), 1)
-        state.extend((self.lru_counters / max_lru).tolist())
+        # ========================================================================
+        # BUG FIX #5: Proper empty slot representation
+        # ========================================================================
+        # Problem: Empty slots (cache_slots[i] = -1) accumulate huge LRU values
+        # Solution: Use special marker -1.0 for empty slots
         
-        # 2. LFU counters (normalize by max frequency)
-        max_lfu = max(self.lfu_counters.max(), 1)
-        state.extend((self.lfu_counters / max_lfu).tolist())
+        # 1. LRU counters with empty slot handling
+        occupied_mask = np.array([slot != -1 for slot in self.cache_slots])
+        
+        for i in range(self.capacity):
+            if self.cache_slots[i] == -1:
+                # Empty slot: use -1.0 as special marker
+                state.append(-1.0)
+            else:
+                # Normalize LRU only among occupied slots
+                if occupied_mask.any():
+                    occupied_lru = self.lru_counters[occupied_mask]
+                    max_lru = max(occupied_lru.max(), 1)
+                    state.append(float(self.lru_counters[i] / max_lru))
+                else:
+                    state.append(0.0)
+        
+        # 2. LFU counters (empty slots have LFU=0, normalize separately)
+        for i in range(self.capacity):
+            if self.cache_slots[i] == -1:
+                state.append(0.0)  # Empty slot
+            else:
+                if occupied_mask.any():
+                    occupied_lfu = self.lfu_counters[occupied_mask]
+                    max_lfu = max(occupied_lfu.max(), 1)
+                    state.append(float(self.lfu_counters[i] / max_lfu))
+                else:
+                    state.append(0.0)
         
         # 3. Requested file popularity
         state.append(float(self.popularity[requested_file]))
         
         # 4. Cache occupancy
-        occupied = np.sum(self.cache_slots != -1)
+        occupied = np.sum(occupied_mask)
         state.append(float(occupied / self.capacity))
         
         # 5-6. Channel quality
@@ -540,7 +603,9 @@ class DQNCache(CacheBase):
         
         bins = []
         for val in key_features:
-            if val < 0.33:
+            if val < 0.0:  # Empty slot marker
+                bins.append('E')
+            elif val < 0.33:
                 bins.append('L')
             elif val < 0.67:
                 bins.append('M')
@@ -757,14 +822,17 @@ class DQNCache(CacheBase):
         if not self.eval_mode:
             self.training_step += 1
             
+            # ====================================================================
+            # ENHANCEMENT #6: Warm-up period
+            # ====================================================================
+            # Wait for buffer to fill before training
+            if len(self.replay_buffer) < self.warm_up_steps:
+                pass  # Skip training during warm-up
+            
             # Train network periodically
-            if self.use_nn and self.training_step % self.train_freq == 0:
+            elif self.use_nn and self.training_step % self.train_freq == 0:
                 if len(self.replay_buffer) >= self.batch_size:
                     self._train_step()
-            
-            # Update target network
-            if self.use_nn and self.training_step % self.target_update_freq == 0:
-                self._soft_update_target()
             
             # Decay epsilon
             if self.epsilon > self.epsilon_end:
@@ -805,11 +873,16 @@ class DQNCache(CacheBase):
         """
         Update LRU/LFU counters.
         
-        LRU: Increment all counters, reset accessed file on hit
+        LRU: Increment only occupied slots, reset accessed file on hit
         LFU: Increment accessed file counter on hit
         """
-        # Increment all LRU counters
-        self.lru_counters += 1
+        # ========================================================================
+        # BUG FIX #5 (Alternative): Only increment LRU for occupied slots
+        # ========================================================================
+        # Increment LRU only for occupied slots (prevents empty slots from growing)
+        for i in range(self.capacity):
+            if self.cache_slots[i] != -1:
+                self.lru_counters[i] += 1
         
         # On cache hit, update the accessed file's counters
         if cache_hit and file_id in self.file_to_slot:
@@ -823,7 +896,7 @@ class DQNCache(CacheBase):
     
     def _train_step(self):
         """
-        Single DQN training step.
+        Single DQN training step with soft target update.
         
         Uses Double DQN to reduce overestimation:
         - Policy network selects best action
@@ -832,7 +905,7 @@ class DQNCache(CacheBase):
         if not self.use_nn or len(self.replay_buffer) < self.batch_size:
             return
         
-        # Sample batch (with beta annealing in prioritized replay)
+        # Sample batch (with smart sampling strategy)
         if self.use_prioritized:
             experiences, weights, indices = self.replay_buffer.sample(self.batch_size)
             if experiences is None:
@@ -877,6 +950,17 @@ class DQNCache(CacheBase):
         
         self.optimizer.step()
         
+        # ========================================================================
+        # BUG FIX #4: Soft target update EVERY training step
+        # ========================================================================
+        # Research: "Soft target updates should happen every training step"
+        # - Lillicrap et al., "Continuous Control with Deep RL", ICLR 2016
+        #
+        # Original implementation had:
+        # - Soft update every 1000 steps (mixed strategy)
+        # Fixed: Soft update every training step (proper DDPG-style)
+        self._soft_update_target()
+        
         # Update priorities
         if self.use_prioritized and indices is not None:
             self.replay_buffer.update_priorities(
@@ -887,11 +971,11 @@ class DQNCache(CacheBase):
     
     def _soft_update_target(self):
         """
-        Soft update of target network.
+        Soft update of target network (DDPG-style, every training step).
         
         θ_target ← τ * θ_policy + (1 - τ) * θ_target
         
-        Prevents target from changing too quickly (stabilizes training).
+        With τ = 0.005, target smoothly tracks policy network.
         """
         for target_param, param in zip(self.target_network.parameters(), 
                                       self.q_network.parameters()):
@@ -1092,7 +1176,8 @@ class DQNCache(CacheBase):
             'replay_buffer_size': len(self.replay_buffer) if self.replay_buffer else 0,
             'use_neural_network': self.use_nn,
             'cic_count': self.cic_count,
-            'sic_count': self.sic_count
+            'sic_count': self.sic_count,
+            'warm_up_steps': self.warm_up_steps
         }
         
         # Add beta value if using prioritized replay
