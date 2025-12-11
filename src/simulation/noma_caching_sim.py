@@ -470,13 +470,6 @@ class NOMACachingSimulator:
             # Both users in outage
             self.metrics['outages'] += 2
         
-        # ❌ REMOVED: Double-counting bug (was counting outages twice!)
-        # OLD (WRONG) CODE:
-        # if not weak_success:
-        #     self.metrics['outages'] += 1
-        # if not strong_success:
-        #     self.metrics['outages'] += 1
-        
         # Throughput
         self.metrics['total_throughput'] += sic_results['sum_rate']
         self.metrics['weak_user_throughput'] += sic_results['rate_w']
@@ -486,11 +479,12 @@ class NOMACachingSimulator:
         self.metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
         
         # ========================================================================
-        # DQN LEARNING (if applicable)
+        # ✅ BUG FIX #3: DQN LEARNING (Corrected Parameters)
         # ========================================================================
         
+        # DQN cache has a specific request() signature - only pass what it accepts
         if hasattr(cache, 'request'):  # DQN cache with NOMA-aware learning
-            # Weak user
+            # Weak user - pass only supported parameters
             cache.request(
                 item=weak_file,
                 user_id=weak_user,
@@ -499,13 +493,13 @@ class NOMACachingSimulator:
                 paired_file=strong_file,
                 noma_success=weak_success,
                 outage=not weak_success,
-                ber=None,  # Could add BER calculation
+                ber=None,  # Optional: could calculate from SINR
                 sinr_weak=sic_results['sinr_w'],
                 sinr_strong=sic_results['sinr_s_after'],
                 episode_done=episode_done
             )
             
-            # Strong user
+            # Strong user - pass only supported parameters
             cache.request(
                 item=strong_file,
                 user_id=strong_user,
@@ -514,6 +508,7 @@ class NOMACachingSimulator:
                 paired_file=weak_file,
                 noma_success=strong_success,
                 outage=not strong_success,
+                ber=None,
                 sinr_weak=sic_results['sinr_w'],
                 sinr_strong=sic_results['sinr_s_after'],
                 episode_done=episode_done
@@ -558,7 +553,7 @@ class NOMACachingSimulator:
         self.metrics['noma_transmissions'] += 1
         self.metrics['total_energy'] += self.cfg.TX_POWER
         
-        # DQN learning
+        # ✅ BUG FIX #3: DQN learning for single user (corrected parameters)
         if hasattr(cache, 'request'):
             cache.request(
                 item=file_id,
