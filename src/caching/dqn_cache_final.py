@@ -23,7 +23,7 @@ Date: December 2025
 import numpy as np
 import random
 from collections import deque, defaultdict
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Iterable
 import pickle
 
 try:
@@ -39,7 +39,7 @@ except ImportError:
 from .cache_base import CacheBase
 
 
-# ============================================================================
+# ====================================================================================
 # DUELING DQN NETWORK (Following DeepMind Architecture)
 # ============================================================================
 
@@ -115,7 +115,7 @@ class DuelingDQN(nn.Module):
         return q_values
 
 
-# ============================================================================
+# ====================================================================================
 # PRIORITIZED EXPERIENCE REPLAY (Schaul et al., ICLR 2016)
 # ============================================================================
 
@@ -190,7 +190,7 @@ class PrioritizedReplayBuffer:
         return len(self.buffer)
 
 
-# ============================================================================
+# ====================================================================================
 # NOMA-AWARE DQN CACHE
 # ============================================================================
 
@@ -452,7 +452,7 @@ class DQNCache(CacheBase):
         Epsilon-greedy action selection.
         
         Returns:
-            action: slot index to evict (0 to capacity-1)
+            action: slot index to evict (0 to capacity-1), or -1 for no action
         """
         # If file already cached, no action needed
         if file_id in self.file_to_slot:
@@ -634,12 +634,15 @@ class DQNCache(CacheBase):
         # Update LRU/LFU counters
         self._update_counters(item, cache_hit)
         
-        # Update popularity
+        # Update popularity (EMA increment on access)
         self.popularity[item] = (
-            self.popularity_decay * self.popularity[item] + 
-            (1 - self.popularity_decay)
+            self.popularity_decay * self.popularity[item]
+            + (1.0 - self.popularity_decay) * 1.0
         )
-        self.popularity /= self.popularity.sum()  # Normalize
+        # Keep others decaying slightly towards 0
+        self.popularity *= self.popularity_decay
+        self.popularity[item] = max(self.popularity[item], 1e-6)
+        self.popularity /= self.popularity.sum()
         
         return result
     
@@ -671,7 +674,7 @@ class DQNCache(CacheBase):
         reward = self._compute_reward(cache_hit, cic_enabled, noma_success, outage, ber)
         self.cumulative_reward += reward
         
-        # Store experience from PREVIOUS action
+        # Store experience from PREVIOUS action (only if a valid action was taken)
         if self.last_state is not None and self.last_action is not None and self.last_action >= 0:
             experience = {
                 'state': self.last_state,
@@ -694,13 +697,14 @@ class DQNCache(CacheBase):
         if not cache_hit:
             action = self._select_action(current_state, file_id)
             
-            # Execute action (update cache)
+            # Execute action (update cache) if valid
             if action >= 0:
                 self._execute_action(action, file_id)
         
-        # Save for next iteration
-        self.last_state = current_state
-        self.last_action = action
+        # Save for next iteration ONLY if a valid action was taken
+        if action >= 0:
+            self.last_state = current_state
+            self.last_action = action
         
         # Training
         if not self.eval_mode:
@@ -739,15 +743,14 @@ class DQNCache(CacheBase):
         
         # Remove old file from slot
         old_file = self.cache_slots[action]
-        if old_file != -1:
-            if old_file in self.file_to_slot:
-                del self.file_to_slot[old_file]
+        if old_file != -1 and old_file in self.file_to_slot:
+            del self.file_to_slot[old_file]
         
         # Add new file
         self.cache_slots[action] = file_id
         self.file_to_slot[file_id] = action
         
-        # Reset counters for this slot
+        # Initialize counters for this slot
         self.lru_counters[action] = 0
         self.lfu_counters[action] = 1
     
@@ -755,14 +758,14 @@ class DQNCache(CacheBase):
         """
         Update LRU/LFU counters.
         
-        LRU: Increment all counters, reset accessed file
-        LFU: Increment accessed file counter
+        LRU: Increment all counters, reset accessed file on hit
+        LFU: Increment accessed file counter on hit
         """
         # Increment all LRU counters
         self.lru_counters += 1
         
-        # Update accessed file
-        if file_id in self.file_to_slot:
+        # On cache hit, update the accessed file's counters
+        if cache_hit and file_id in self.file_to_slot:
             slot = self.file_to_slot[file_id]
             self.lru_counters[slot] = 0  # Reset LRU
             self.lfu_counters[slot] += 1  # Increment LFU
@@ -879,7 +882,7 @@ class DQNCache(CacheBase):
     # CACHE INTERFACE METHODS
     # ========================================================================
     
-    def populate(self, items: Optional[Iterable] = None):
+    def populate(self, items: Optional[Iterable[int]] = None):
         """
         Initialize cache with most popular files.
         
@@ -899,6 +902,7 @@ class DQNCache(CacheBase):
             self.cache_slots[slot] = int(file_id)
             self.file_to_slot[int(file_id)] = slot
             self.lfu_counters[slot] = 1
+            self.lru_counters[slot] = 0
     
     def is_hit(self, item: int, update_stats: bool = True) -> bool:
         """
