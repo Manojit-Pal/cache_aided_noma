@@ -220,15 +220,17 @@ class NOMACachingSimulator:
         )
         
         # Compute channel gains
-        # ✅ BUG FIX #4 & #5: Correct ALL parameter names to match function signature
+        # ✅ BUG FIX #4, #5, #7: Correct ALL parameter names and remove unsupported 'seed'
         # Function signature: compute_channel_gains(positions, exponent, min_distance, 
         #                     fading_type, K_factor_db, los_probability)
+        #                     NO 'seed' parameter!
         channel_gains = compute_channel_gains(
             user_positions,
             exponent=self.cfg.PATHLOSS_EXPONENT,       # ✅ 'exponent' not 'pathloss_exponent'
             fading_type=self.cfg.FADING_TYPE,          # ✅ Correct
             K_factor_db=self.cfg.RICIAN_K_FACTOR_DB,   # ✅ 'K_factor_db' not 'rician_k_db'
             los_probability=self.cfg.LOS_PROBABILITY   # ✅ Correct
+            # ✅ Removed 'seed' - not supported by compute_channel_gains()
         )
         
         # ========================================================================
@@ -307,10 +309,11 @@ class NOMACachingSimulator:
             return self._compile_results(cache)
         
         # Pair users according to strategy
+        # ✅ BUG FIX #6: Correct call with users list first, then channel_gains
         pairs, leftover_user = pair_users(
-            miss_users,
-            channel_gains,
-            method=self.cfg.PAIRING_METHOD
+            miss_users,           # ✅ First: list of users to pair
+            channel_gains,        # ✅ Second: complete channel gains array
+            method=self.cfg.PAIRING_METHOD  # ✅ Third: method as keyword arg
         )
         
         self.metrics['pairs_formed'] = len(pairs)
