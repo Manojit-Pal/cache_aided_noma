@@ -327,7 +327,14 @@ class LFUCache(CacheBase):
             
             self.store.add(item)
             self.counter[item] = 1
-            self.weighted_counter[item] = 1.0
+            
+            # FIX: Initialize weighted counter with channel-based weight on MISS too!
+            if self.channel_weighted_frequency and channel_gain is not None:
+                initial_weight = 1.0 / (channel_gain + 1e-9)
+                self.weighted_counter[item] = initial_weight
+            else:
+                self.weighted_counter[item] = 1.0
+            
             if update_stats:
                 self._record_miss()
             return False
