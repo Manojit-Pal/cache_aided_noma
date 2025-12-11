@@ -790,3 +790,11 @@ class StableDQNCache(CacheBase):
             self.cumulative_reward = checkpoint.get('cumulative_reward', 0.0)
             self.cache_slots = checkpoint.get('cache_slots', self.cache_slots)
             self.file_to_slot = checkpoint.get('file_to_slot', {})
+
+            
+            
+
+
+
+            
+            

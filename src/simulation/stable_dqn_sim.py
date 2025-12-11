@@ -77,7 +77,9 @@ def train_dqn_cache(
     start_time = time.time()
     
     for episode in range(num_episodes):
-        episode_reward = 0.0
+        # Track reward specific to THIS episode
+        start_cum_reward = cache.get_stats()['cumulative_reward']
+        
         episode_hits = 0
         episode_requests = 0
         
@@ -160,9 +162,14 @@ def train_dqn_cache(
         
         # Episode statistics
         stats = cache.get_stats()
+        
+        # Calculate ACTUAL episode reward (Difference between end and start)
+        current_cum_reward = stats['cumulative_reward']
+        actual_episode_reward = current_cum_reward - start_cum_reward
+        
         episode_hit_rate = episode_hits / episode_requests if episode_requests > 0 else 0
         
-        episode_rewards.append(stats['cumulative_reward'])
+        episode_rewards.append(actual_episode_reward)
         episode_hit_rates.append(episode_hit_rate)
         episode_losses.append(stats['avg_loss'])
         
@@ -171,6 +178,7 @@ def train_dqn_cache(
             elapsed = time.time() - start_time
             print(f"Episode {episode+1}/{num_episodes} | "
                   f"Hit Rate: {episode_hit_rate:.3f} | "
+                  f"Reward: {actual_episode_reward:.1f} | "  # Changed to display episode reward
                   f"Epsilon: {stats['epsilon']:.3f} | "
                   f"Loss: {stats['avg_loss']:.6f} | "
                   f"Time: {elapsed:.1f}s")
@@ -537,10 +545,10 @@ def plot_results(df: pd.DataFrame, training_stats: Dict, save_dir: str = './'):
     axes[1].set_yscale('log')
     axes[1].grid(True, alpha=0.3)
     
-    # Cumulative Reward
+    # Episode Reward (FIXED: Now showing episode reward instead of cumulative)
     axes[2].plot(episodes, training_stats['episode_rewards'], 'g-', linewidth=2)
     axes[2].set_xlabel('Episode')
-    axes[2].set_ylabel('Cumulative Reward')
+    axes[2].set_ylabel('Episode Reward')
     axes[2].set_title('DQN Training: Reward Progress')
     axes[2].grid(True, alpha=0.3)
     
@@ -580,5 +588,8 @@ if __name__ == "__main__":
     print(f"\n{'='*80}")
     print("✅ SIMULATION COMPLETE!")
     print(f"{'='*80}\n")
+    
+
+
 
     

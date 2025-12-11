@@ -1,0 +1,7 @@
+,hit_rate,hit_rate,hit_rate,hit_rate,outage_rate,outage_rate,outage_rate,outage_rate,noma_success_rate,noma_success_rate
+,mean,std,min,max,mean,std,min,max,mean,std
+policy,,,,,,,,,,
+lfu,0.6652,0.0032,0.6611,0.6693,0.4937,0.0198,0.4373,0.5,0.5,0.0
+lru,0.6077,0.0051,0.6017,0.6163,0.4928,0.0195,0.4378,0.5,0.5,0.0
+stable_dqn,0.5727,0.0051,0.5628,0.5814,0.3625,0.0226,0.3212,0.3952,0.6375,0.0226
+topk,0.7296,0.003,0.7246,0.7354,0.4941,0.0185,0.4415,0.5,0.5,0.0
