@@ -484,40 +484,65 @@ class NOMACachingSimulator:
         self.metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
         
         # ========================================================================
-        # ✅ BUG FIX #3: DQN LEARNING (Corrected Parameters)
+        # ✅ BUG FIX #9: Cache Learning - Use Correct Method Based on Cache Type
         # ========================================================================
         
-        # DQN cache has a specific request() signature - only pass what it accepts
-        if hasattr(cache, 'request'):  # DQN cache with NOMA-aware learning
-            # Weak user - pass only supported parameters
-            cache.request(
-                item=weak_file,
-                user_id=weak_user,
-                channel_gain=gain_w,
-                paired_user=strong_user,
-                paired_file=strong_file,
-                noma_success=weak_success,
-                outage=not weak_success,
-                ber=None,  # Optional: could calculate from SINR
-                sinr_weak=sic_results['sinr_w'],
-                sinr_strong=sic_results['sinr_s_after'],
-                episode_done=episode_done
-            )
-            
-            # Strong user - pass only supported parameters
-            cache.request(
-                item=strong_file,
-                user_id=strong_user,
-                channel_gain=gain_s,
-                paired_user=weak_user,
-                paired_file=weak_file,
-                noma_success=strong_success,
-                outage=not strong_success,
-                ber=None,
-                sinr_weak=sic_results['sinr_w'],
-                sinr_strong=sic_results['sinr_s_after'],
-                episode_done=episode_done
-            )
+        # Check if this is a DQN cache (has custom request signature)
+        is_dqn_cache = hasattr(cache, 'learning_rate')  # DQN-specific attribute
+        
+        if is_dqn_cache:
+            # DQN cache with NOMA-aware learning - use full parameter set
+            if hasattr(cache, 'request'):
+                # Weak user
+                cache.request(
+                    item=weak_file,
+                    user_id=weak_user,
+                    channel_gain=gain_w,
+                    paired_user=strong_user,
+                    paired_file=strong_file,
+                    noma_success=weak_success,
+                    outage=not weak_success,
+                    ber=None,  # Optional: could calculate from SINR
+                    sinr_weak=sic_results['sinr_w'],
+                    sinr_strong=sic_results['sinr_s_after'],
+                    episode_done=episode_done
+                )
+                
+                # Strong user
+                cache.request(
+                    item=strong_file,
+                    user_id=strong_user,
+                    channel_gain=gain_s,
+                    paired_user=weak_user,
+                    paired_file=weak_file,
+                    noma_success=strong_success,
+                    outage=not strong_success,
+                    ber=None,
+                    sinr_weak=sic_results['sinr_w'],
+                    sinr_strong=sic_results['sinr_s_after'],
+                    episode_done=episode_done
+                )
+        else:
+            # ✅ Non-DQN caches (TopK, LRU, LFU, Random) - use base request() signature
+            # Base CacheBase.request() only accepts: item, user_id, channel_gain, paired_user, paired_file
+            if hasattr(cache, 'request'):
+                # Weak user - only basic parameters
+                cache.request(
+                    item=weak_file,
+                    user_id=weak_user,
+                    channel_gain=gain_w,
+                    paired_user=strong_user,
+                    paired_file=strong_file
+                )
+                
+                # Strong user - only basic parameters
+                cache.request(
+                    item=strong_file,
+                    user_id=strong_user,
+                    channel_gain=gain_s,
+                    paired_user=weak_user,
+                    paired_file=weak_file
+                )
         
         # Store transmission history
         self.transmission_history.append({
@@ -558,8 +583,11 @@ class NOMACachingSimulator:
         self.metrics['noma_transmissions'] += 1
         self.metrics['total_energy'] += self.cfg.TX_POWER
         
-        # ✅ BUG FIX #3: DQN learning for single user (corrected parameters)
-        if hasattr(cache, 'request'):
+        # ✅ BUG FIX #9: Single user cache learning (corrected for non-DQN caches)
+        is_dqn_cache = hasattr(cache, 'learning_rate')
+        
+        if is_dqn_cache and hasattr(cache, 'request'):
+            # DQN cache - full parameters
             cache.request(
                 item=file_id,
                 user_id=user_id,
@@ -567,6 +595,13 @@ class NOMACachingSimulator:
                 noma_success=success,
                 outage=not success,
                 episode_done=episode_done
+            )
+        elif hasattr(cache, 'request'):
+            # Non-DQN cache - basic parameters only
+            cache.request(
+                item=file_id,
+                user_id=user_id,
+                channel_gain=gain
             )
     
     def _compile_results(self, cache: CacheBase) -> Dict:
