@@ -21,6 +21,7 @@ Date: December 2025
 
 Bug Fixes:
 - BUG #1 (CRITICAL): Fixed popularity EMA double-decay error
+- BUG #2 (CRITICAL): Added beta annealing to prioritized replay
 """
 
 import numpy as np
@@ -124,24 +125,42 @@ class DuelingDQN(nn.Module):
 
 class PrioritizedReplayBuffer:
     """
-    Prioritized Experience Replay Buffer.
+    Prioritized Experience Replay Buffer with Beta Annealing.
     
     Samples transitions with probability proportional to TD-error,
     allowing agent to learn more from surprising experiences.
     
     Based on: Schaul et al., "Prioritized Experience Replay", ICLR 2016
+    
+    Key insight: Beta should be annealed from initial value to 1.0 over training
+    to compensate for bias introduced by prioritized sampling.
     """
     
-    def __init__(self, capacity: int, alpha: float = 0.6, beta: float = 0.4):
+    def __init__(
+        self, 
+        capacity: int, 
+        alpha: float = 0.6, 
+        beta_start: float = 0.4,
+        beta_end: float = 1.0,
+        beta_frames: int = 100000
+    ):
         """
         Args:
             capacity: Maximum buffer size
             alpha: Priority exponent (0=uniform, 1=full prioritization)
-            beta: Importance sampling exponent (compensates for bias)
+            beta_start: Initial importance sampling exponent (lower = more bias, faster learning)
+            beta_end: Final importance sampling exponent (1.0 = no bias, accurate)
+            beta_frames: Number of frames to anneal beta from start to end
         """
         self.capacity = capacity
         self.alpha = alpha
-        self.beta = beta
+        
+        # Beta annealing schedule (Schaul et al., 2016)
+        self.beta = beta_start
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self.beta_frames = beta_frames
+        self.frame_idx = 0
         
         self.buffer = deque(maxlen=capacity)
         self.priorities = deque(maxlen=capacity)
@@ -154,7 +173,7 @@ class PrioritizedReplayBuffer:
     
     def sample(self, batch_size: int) -> Tuple[List[Dict], np.ndarray, np.ndarray]:
         """
-        Sample batch with prioritized sampling.
+        Sample batch with prioritized sampling and annealed importance sampling.
         
         Returns:
             experiences: List of experience dicts
@@ -163,6 +182,17 @@ class PrioritizedReplayBuffer:
         """
         if len(self.buffer) < batch_size:
             return None, None, None
+        
+        # ========================================================================
+        # BUG FIX #2: Anneal beta from beta_start to beta_end
+        # ========================================================================
+        # Research: "We linearly anneal β from its initial value β₀ to 1"
+        # - Schaul et al., "Prioritized Experience Replay", ICLR 2016
+        self.frame_idx += 1
+        self.beta = min(
+            self.beta_end,
+            self.beta_start + (self.beta_end - self.beta_start) * (self.frame_idx / self.beta_frames)
+        )
         
         # Compute sampling probabilities
         priorities = np.array(self.priorities, dtype=np.float64)
@@ -173,7 +203,7 @@ class PrioritizedReplayBuffer:
         indices = np.random.choice(len(self.buffer), batch_size, 
                                   p=probs, replace=False)
         
-        # Compute importance sampling weights
+        # Compute importance sampling weights with current beta
         weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
         weights /= weights.max()  # Normalize for stability
         
@@ -188,6 +218,10 @@ class PrioritizedReplayBuffer:
             if 0 <= idx < len(self.priorities):
                 self.priorities[idx] = priority
                 self.max_priority = max(self.max_priority, priority)
+    
+    def get_beta(self) -> float:
+        """Get current beta value (for logging/debugging)."""
+        return self.beta
     
     def __len__(self):
         return len(self.buffer)
@@ -264,7 +298,9 @@ class DQNCache(CacheBase):
         # Prioritized replay
         use_prioritized_replay: bool = True,
         priority_alpha: float = 0.6,
-        priority_beta: float = 0.4,
+        priority_beta_start: float = 0.4,
+        priority_beta_end: float = 1.0,
+        priority_beta_frames: int = 100000,
         
         # Stability
         gradient_clip: float = 10.0,
@@ -349,10 +385,14 @@ class DQNCache(CacheBase):
                 weight_decay=1e-5
             )
             
-            # Experience replay
+            # Experience replay with beta annealing
             if use_prioritized_replay:
                 self.replay_buffer = PrioritizedReplayBuffer(
-                    replay_buffer_size, priority_alpha, priority_beta
+                    capacity=replay_buffer_size,
+                    alpha=priority_alpha,
+                    beta_start=priority_beta_start,
+                    beta_end=priority_beta_end,
+                    beta_frames=priority_beta_frames
                 )
                 self.use_prioritized = True
             else:
@@ -379,6 +419,8 @@ class DQNCache(CacheBase):
         print(f"   Action dim: {self.action_dim}")
         print(f"   Device: {self.device if self.use_nn else 'CPU'}")
         print(f"   NOMA-aware: {self.enable_noma_awareness}")
+        if self.use_prioritized:
+            print(f"   PER beta: {priority_beta_start:.2f} → {priority_beta_end:.2f} over {priority_beta_frames} frames")
     
     def _set_seeds(self, seed: int):
         """Set random seeds for reproducibility."""
@@ -790,7 +832,7 @@ class DQNCache(CacheBase):
         if not self.use_nn or len(self.replay_buffer) < self.batch_size:
             return
         
-        # Sample batch
+        # Sample batch (with beta annealing in prioritized replay)
         if self.use_prioritized:
             experiences, weights, indices = self.replay_buffer.sample(self.batch_size)
             if experiences is None:
@@ -970,7 +1012,7 @@ class DQNCache(CacheBase):
     def save_model(self, filepath: str):
         """Save learned model to file."""
         if self.use_nn:
-            torch.save({
+            save_dict = {
                 'q_network': self.q_network.state_dict(),
                 'target_network': self.target_network.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
@@ -981,7 +1023,14 @@ class DQNCache(CacheBase):
                 'file_to_slot': self.file_to_slot,
                 'lru_counters': self.lru_counters,
                 'lfu_counters': self.lfu_counters
-            }, filepath)
+            }
+            
+            # Save beta state if using prioritized replay
+            if self.use_prioritized:
+                save_dict['per_beta'] = self.replay_buffer.get_beta()
+                save_dict['per_frame_idx'] = self.replay_buffer.frame_idx
+            
+            torch.save(save_dict, filepath)
         else:
             with open(filepath, 'wb') as f:
                 pickle.dump({
@@ -1009,6 +1058,11 @@ class DQNCache(CacheBase):
             self.file_to_slot = checkpoint['file_to_slot']
             self.lru_counters = checkpoint.get('lru_counters', self.lru_counters)
             self.lfu_counters = checkpoint.get('lfu_counters', self.lfu_counters)
+            
+            # Restore beta state if available
+            if self.use_prioritized and 'per_beta' in checkpoint:
+                self.replay_buffer.beta = checkpoint['per_beta']
+                self.replay_buffer.frame_idx = checkpoint.get('per_frame_idx', 0)
         else:
             with open(filepath, 'rb') as f:
                 checkpoint = pickle.load(f)
@@ -1040,6 +1094,10 @@ class DQNCache(CacheBase):
             'cic_count': self.cic_count,
             'sic_count': self.sic_count
         }
+        
+        # Add beta value if using prioritized replay
+        if self.use_prioritized and hasattr(self.replay_buffer, 'get_beta'):
+            dqn_stats['per_beta'] = self.replay_buffer.get_beta()
         
         return {**base_stats, **dqn_stats}
 
