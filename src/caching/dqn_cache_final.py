@@ -18,6 +18,9 @@ Key NOMA Features:
 
 Author: Cache-Aided NOMA Team
 Date: December 2025
+
+Bug Fixes:
+- BUG #1 (CRITICAL): Fixed popularity EMA double-decay error
 """
 
 import numpy as np
@@ -634,14 +637,16 @@ class DQNCache(CacheBase):
         # Update LRU/LFU counters
         self._update_counters(item, cache_hit)
         
-        # Update popularity (EMA increment on access)
+        # ========================================================================
+        # BUG FIX #1: Correct EMA popularity update (removed double-decay)
+        # ========================================================================
+        # Standard EMA: p[i] = decay * p[i] + (1 - decay) * 1.0 for accessed item
+        # Others naturally decay through normalization
         self.popularity[item] = (
             self.popularity_decay * self.popularity[item]
-            + (1.0 - self.popularity_decay) * 1.0
+            + (1.0 - self.popularity_decay)
         )
-        # Keep others decaying slightly towards 0
-        self.popularity *= self.popularity_decay
-        self.popularity[item] = max(self.popularity[item], 1e-6)
+        # Normalize to maintain probability distribution
         self.popularity /= self.popularity.sum()
         
         return result
