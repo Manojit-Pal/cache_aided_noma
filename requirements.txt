@@ -1,5 +1,82 @@
-numpy>=1.23
-pandas>=1.4
-matplotlib>=3.5
-scipy>=1.8
-scikit-learn>=1.0
+# ============================================================================
+# Cache-Aided NOMA - Project Requirements
+# ============================================================================
+# Compatible with Python 3.8, 3.9, 3.10, 3.11
+# Installation: pip install -r requirements.txt
+# GPU Support: pip install -r requirements.txt torch --index-url https://download.pytorch.org/whl/cu118
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Core Scientific Computing
+# ----------------------------------------------------------------------------
+numpy>=1.23.0,<2.0.0
+pandas>=1.4.0,<3.0.0
+scipy>=1.8.0,<2.0.0
+
+# ----------------------------------------------------------------------------
+# Machine Learning & Deep Reinforcement Learning
+# ----------------------------------------------------------------------------
+# PyTorch (DQN implementation)
+# For CPU-only installation:
+torch>=2.0.0,<2.5.0
+
+# For CUDA 11.8 (GPU support), replace above with:
+# torch>=2.0.0,<2.5.0 --index-url https://download.pytorch.org/whl/cu118
+
+# For CUDA 12.1 (GPU support), replace above with:
+# torch>=2.0.0,<2.5.0 --index-url https://download.pytorch.org/whl/cu121
+
+# Traditional ML (used in baseline comparisons)
+scikit-learn>=1.0.0,<2.0.0
+
+# ----------------------------------------------------------------------------
+# Visualization & Plotting
+# ----------------------------------------------------------------------------
+matplotlib>=3.5.0,<4.0.0
+seaborn>=0.12.0,<1.0.0         # Enhanced statistical plots
+
+# ----------------------------------------------------------------------------
+# Utilities & Performance
+# ----------------------------------------------------------------------------
+tqdm>=4.64.0                    # Progress bars for training
+
+# ----------------------------------------------------------------------------
+# Optional: Development Tools (uncomment if needed)
+# ----------------------------------------------------------------------------
+# pytest>=7.0.0                 # Testing framework
+# black>=22.0.0                 # Code formatting
+# flake8>=4.0.0                 # Linting
+# ipython>=8.0.0                # Interactive shell
+# jupyter>=1.0.0                # Notebooks
+# tensorboard>=2.11.0           # Training visualization
+
+# ============================================================================
+# Version Information
+# ============================================================================
+# Tested Configurations:
+# - Python 3.10 + NumPy 1.24 + PyTorch 2.1 + CUDA 11.8 ✅
+# - Python 3.11 + NumPy 1.26 + PyTorch 2.2 + CPU ✅
+# - Python 3.9 + NumPy 1.23 + PyTorch 2.0 + CUDA 12.1 ✅
+#
+# Installation Notes:
+# 1. Basic installation (CPU only):
+#    pip install -r requirements.txt
+#
+# 2. With GPU support (CUDA 11.8):
+#    pip install -r requirements.txt
+#    pip install torch --index-url https://download.pytorch.org/whl/cu118
+#
+# 3. With GPU support (CUDA 12.1):
+#    pip install -r requirements.txt
+#    pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# 4. For development (includes testing tools):
+#    pip install -r requirements.txt
+#    pip install pytest black flake8 ipython jupyter tensorboard
+#
+# Verification:
+#    python -c "import numpy, pandas, scipy, sklearn, matplotlib, torch; print('✅ All dependencies OK')"
+#
+# GPU Check:
+#    python -c "import torch; print('CUDA Available:', torch.cuda.is_available())"
+# ============================================================================
