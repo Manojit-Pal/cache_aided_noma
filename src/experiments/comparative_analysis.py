@@ -19,23 +19,19 @@ Metrics Analyzed (vs SNR):
 - Individual User Rates (weak/strong)
 - Outage Probability
 - BER (Bit Error Rate)
-- CIC Benefit Rate (NOVEL)
-- SIC Success Rate
 - Cache Hit Probability
 - Spectral Efficiency
 - Energy Efficiency
 - Fairness (Jain's Index)
 
 Outputs:
-- cache_aided_vs_traditional_noma.png: Main comparison (9 subplots)
-- cic_benefit_analysis.png: CIC-specific analysis
-- multi_policy_comparison.png: All caching policies
+- cache_aided_vs_traditional_noma.png: Main comparison (8 subplots)
 - results_comparative_analysis.csv: Complete dataset
 - performance_summary.txt: Statistical summary
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 3.1 (Bug Fix: IndexError in save_results)
+Version: 3.2 (Bug Fixes: NO-CACHE visibility, CIC plot removed)
 """
 
 import numpy as np
@@ -94,7 +90,6 @@ class CacheAidedNOMAAnalysis:
     Implements comprehensive comparison between:
     - Cache-Aided NOMA (TopK, LRU, LFU, Random, DQN)
     - Traditional NOMA (no cache)
-    - OMA (reference baseline)
     
     Based on:
     - arXiv:1712.09557: CIC benefit measurement
@@ -150,12 +145,13 @@ class CacheAidedNOMAAnalysis:
         Create cache instance for given policy.
         
         Args:
-            policy: 'topk', 'lru', 'lfu', 'random', 'dqn', or None
+            policy: 'topk', 'lru', 'lfu', 'random', 'dqn', or 'none'
             requests: File requests for popularity estimation
         
         Returns:
             Cache instance or None
         """
+        # 🐛 FIX: Use string 'none' instead of None to avoid NaN in CSV
         if policy is None or policy == 'none':
             return None
         
@@ -163,6 +159,10 @@ class CacheAidedNOMAAnalysis:
             if not HAS_DQN:
                 print(f"⚠️  DQN not available, skipping")
                 return None
+            # ⚠️ WARNING: DQN cache should be pre-trained!
+            print(f"⚠️  WARNING: DQN cache initialized but NOT TRAINED!")
+            print(f"   For best results, train DQN first using:")
+            print(f"   python -m src.simulation.train_and_evaluate_dqn")
             # Create DQN cache (will be trained separately)
             return create_cache(
                 policy='dqn',
@@ -380,7 +380,7 @@ class CacheAidedNOMAAnalysis:
         
         Args:
             snr_db: SNR in dB
-            policy: Caching policy ('topk', 'lru', 'lfu', 'random', 'dqn', None)
+            policy: Caching policy ('topk', 'lru', 'lfu', 'random', 'dqn', 'none')
             seed_offset: Random seed offset
         
         Returns:
@@ -480,6 +480,7 @@ class CacheAidedNOMAAnalysis:
             DataFrame with complete results
         """
         if policies is None:
+            # 🐛 FIX: Use string 'none' instead of None to avoid NaN
             policies = ['topk', 'lru', 'lfu', 'random', 'none']
             if HAS_DQN:
                 policies.append('dqn')
@@ -487,15 +488,15 @@ class CacheAidedNOMAAnalysis:
         print(f"\n{'='*70}")
         print("RUNNING COMPREHENSIVE COMPARISON")
         print(f"{'='*70}")
-        print(f"Policies: {', '.join([p.upper() if p else 'NO-CACHE' for p in policies])}")
+        print(f"Policies: {', '.join([p.upper() if p != 'none' else 'NO-CACHE' for p in policies])}")
         print(f"SNR range: {self.snr_db_range[0]} to {self.snr_db_range[-1]} dB")
         print(f"Monte Carlo runs per point: {self.num_realizations}\n")
         
         all_results = []
         
         for policy in policies:
-            policy_name = policy if policy else 'none'
-            print(f"\nProcessing {policy_name.upper()} policy...")
+            policy_name = policy if policy != 'none' else 'NO-CACHE'
+            print(f"\nProcessing {policy_name} policy...")
             
             for idx, snr_db in enumerate(self.snr_db_range):
                 print(f"  SNR = {snr_db:+3d} dB ({idx+1}/{len(self.snr_db_range)})", end='\r')
@@ -507,7 +508,7 @@ class CacheAidedNOMAAnalysis:
                 )
                 all_results.append(result)
             
-            print(f"  ✅ {policy_name.upper()} completed")
+            print(f"  ✅ {policy_name} completed")
         
         df = pd.DataFrame(all_results)
         
@@ -524,9 +525,11 @@ class CacheAidedNOMAAnalysis:
     
     def plot_main_comparison(self, df: pd.DataFrame, save_path: str = None):
         """
-        Create comprehensive 9-subplot comparison figure.
+        Create comprehensive 8-subplot comparison figure.
+        
+        🐛 FIXED: Removed CIC subplot as requested
         """
-        fig = plt.figure(figsize=(20, 14))
+        fig = plt.figure(figsize=(20, 12))
         fig.suptitle('Cache-Aided NOMA vs Traditional NOMA: Comprehensive Analysis',
                     fontsize=18, fontweight='bold', y=0.995)
         
@@ -538,7 +541,7 @@ class CacheAidedNOMAAnalysis:
         ax1 = plt.subplot(3, 3, 1)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
             ax1.plot(data['snr_db'], data['sum_rate_mean'], 
                     marker='o', label=label, color=policy_colors[policy], linewidth=2)
             ax1.fill_between(data['snr_db'],
@@ -555,7 +558,7 @@ class CacheAidedNOMAAnalysis:
         ax2 = plt.subplot(3, 3, 2)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
             ax2.semilogy(data['snr_db'], data['outage_probability'],
                         marker='s', label=label, color=policy_colors[policy], linewidth=2)
         ax2.set_xlabel('SNR (dB)', fontsize=11)
@@ -567,7 +570,7 @@ class CacheAidedNOMAAnalysis:
         # 3. Cache Hit Rate vs SNR
         ax3 = plt.subplot(3, 3, 3)
         for policy in policies:
-            if policy is None or policy == 'none':
+            if policy == 'none':
                 continue
             data = df[df['policy'] == policy]
             label = policy.upper()
@@ -583,7 +586,7 @@ class CacheAidedNOMAAnalysis:
         ax4 = plt.subplot(3, 3, 4)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
             ax4.plot(data['snr_db'], data['rate_weak_mean'],
                     marker='o', label=label, color=policy_colors[policy], linewidth=2)
         ax4.set_xlabel('SNR (dB)', fontsize=11)
@@ -596,7 +599,7 @@ class CacheAidedNOMAAnalysis:
         ax5 = plt.subplot(3, 3, 5)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
             ax5.plot(data['snr_db'], data['rate_strong_mean'],
                     marker='s', label=label, color=policy_colors[policy], linewidth=2)
         ax5.set_xlabel('SNR (dB)', fontsize=11)
@@ -609,7 +612,7 @@ class CacheAidedNOMAAnalysis:
         ax6 = plt.subplot(3, 3, 6)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
             ax6.semilogy(data['snr_db'], data['ber_weak_mean'],
                         marker='^', label=label, color=policy_colors[policy], linewidth=2)
         ax6.set_xlabel('SNR (dB)', fontsize=11)
@@ -618,46 +621,33 @@ class CacheAidedNOMAAnalysis:
         ax6.grid(True, which='both', alpha=0.3)
         ax6.legend(fontsize=9, loc='best')
         
-        # 7. CIC Benefit Rate vs SNR (NOVEL)
+        # 7. Fairness vs SNR
         ax7 = plt.subplot(3, 3, 7)
         for policy in policies:
-            if policy is None or policy == 'none':
-                continue
             data = df[df['policy'] == policy]
-            label = policy.upper()
-            ax7.plot(data['snr_db'], data['cic_benefit_rate'],
-                    marker='D', label=label, color=policy_colors[policy], linewidth=2)
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
+            ax7.plot(data['snr_db'], data['fairness_mean'],
+                    marker='*', label=label, color=policy_colors[policy], linewidth=2)
         ax7.set_xlabel('SNR (dB)', fontsize=11)
-        ax7.set_ylabel('CIC Benefit Rate', fontsize=11)
-        ax7.set_title('CIC Benefit Rate vs SNR (NOVEL)', fontsize=12, fontweight='bold')
+        ax7.set_ylabel("Jain's Fairness Index", fontsize=11)
+        ax7.set_title('Fairness vs SNR', fontsize=12, fontweight='bold')
         ax7.grid(True, alpha=0.3)
         ax7.legend(fontsize=9, loc='best')
         
-        # 8. Fairness vs SNR
+        # 8. Energy Efficiency vs SNR
         ax8 = plt.subplot(3, 3, 8)
         for policy in policies:
             data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
-            ax8.plot(data['snr_db'], data['fairness_mean'],
-                    marker='*', label=label, color=policy_colors[policy], linewidth=2)
+            label = policy.upper() if policy != 'none' else 'NO-CACHE'
+            ax8.plot(data['snr_db'], data['energy_efficiency'],
+                    marker='P', label=label, color=policy_colors[policy], linewidth=2)
         ax8.set_xlabel('SNR (dB)', fontsize=11)
-        ax8.set_ylabel("Jain's Fairness Index", fontsize=11)
-        ax8.set_title('Fairness vs SNR', fontsize=12, fontweight='bold')
+        ax8.set_ylabel('Energy Efficiency (bits/J)', fontsize=11)
+        ax8.set_title('Energy Efficiency vs SNR', fontsize=12, fontweight='bold')
         ax8.grid(True, alpha=0.3)
         ax8.legend(fontsize=9, loc='best')
         
-        # 9. Energy Efficiency vs SNR
-        ax9 = plt.subplot(3, 3, 9)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy else 'NO-CACHE'
-            ax9.plot(data['snr_db'], data['energy_efficiency'],
-                    marker='P', label=label, color=policy_colors[policy], linewidth=2)
-        ax9.set_xlabel('SNR (dB)', fontsize=11)
-        ax9.set_ylabel('Energy Efficiency (bits/J)', fontsize=11)
-        ax9.set_title('Energy Efficiency vs SNR', fontsize=12, fontweight='bold')
-        ax9.grid(True, alpha=0.3)
-        ax9.legend(fontsize=9, loc='best')
+        # Subplot 9 intentionally left empty (CIC plot removed)
         
         plt.tight_layout(rect=[0, 0, 1, 0.99])
         
@@ -706,7 +696,7 @@ class CacheAidedNOMAAnalysis:
                         continue  # Skip if no data for this policy
                     
                     policy_row = policy_data.iloc[0]
-                    policy_name = policy.upper() if policy else 'NO-CACHE'
+                    policy_name = policy.upper() if policy != 'none' else 'NO-CACHE'
                     
                     f.write(f"{policy_name}:\n")
                     f.write(f"  Sum-Rate: {policy_row['sum_rate_mean']:.4f} bps/Hz\n")
@@ -744,7 +734,8 @@ def main():
     )
     
     # Run comparison
-    policies = ['topk', 'lru', 'lfu', 'random', None]
+    # 🐛 FIX: Use 'none' string, not None
+    policies = ['topk', 'lru', 'lfu', 'random', 'none']
     if HAS_DQN:
         policies.append('dqn')
     
