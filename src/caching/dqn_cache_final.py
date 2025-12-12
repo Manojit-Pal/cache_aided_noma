@@ -926,11 +926,12 @@ class DQNCache(CacheBase):
             indices = None
         
         # Prepare tensors
-        states = torch.FloatTensor([e['state'] for e in experiences]).to(self.device)
-        actions = torch.LongTensor([e['action'] for e in experiences]).to(self.device)
-        rewards = torch.FloatTensor([e['reward'] for e in experiences]).to(self.device)
-        next_states = torch.FloatTensor([e['next_state'] for e in experiences]).to(self.device)
-        dones = torch.FloatTensor([e['done'] for e in experiences]).to(self.device)
+        # ✅ FIX #8: Optimized tensor creation (no warning)
+        states = torch.from_numpy(np.array([e['state'] for e in experiences], dtype=np.float32)).to(self.device)
+        actions = torch.from_numpy(np.array([e['action'] for e in experiences], dtype=np.int64)).to(self.device)
+        rewards = torch.from_numpy(np.array([e['reward'] for e in experiences], dtype=np.float32)).to(self.device)
+        next_states = torch.from_numpy(np.array([e['next_state'] for e in experiences], dtype=np.float32)).to(self.device)
+        dones = torch.from_numpy(np.array([e['done'] for e in experiences], dtype=np.float32)).to(self.device)
         
         # Current Q-values: Q(s,a)
         current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -1186,9 +1187,13 @@ class DQNCache(CacheBase):
     # ========================================================================
     
     def get_stats(self) -> Dict:
-        """Get comprehensive statistics."""
+        """
+        Get comprehensive statistics.
+    
+        ✅ FIX #7 (Dec 12, 2025): Proper beta retrieval from PER buffer
+        """
         base_stats = super().stats()
-        
+    
         dqn_stats = {
             'training_step': self.training_step,
             'epsilon': self.epsilon,
@@ -1201,12 +1206,18 @@ class DQNCache(CacheBase):
             'sic_count': self.sic_count,
             'warm_up_steps': self.warm_up_steps
         }
-        
-        # Add beta value if using prioritized replay
-        if self.use_prioritized and hasattr(self.replay_buffer, 'get_beta'):
-            dqn_stats['per_beta'] = self.replay_buffer.get_beta()
-        
+    
+        # ✅ FIX #7: Always add beta value with correct key name
+        if self.use_prioritized and self.replay_buffer is not None:
+            try:
+                dqn_stats['beta'] = self.replay_buffer.get_beta()  # Changed from 'per_beta' to 'beta'
+            except (AttributeError, TypeError):
+                dqn_stats['beta'] = 0.0
+        else:
+            dqn_stats['beta'] = 0.0  # Not using PER
+    
         return {**base_stats, **dqn_stats}
+
 
 
 # Alias for compatibility

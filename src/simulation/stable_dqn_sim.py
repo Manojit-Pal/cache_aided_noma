@@ -133,7 +133,7 @@ class NOMADQNTrainer:
         print(f"  NOMA Pairing: {self.cfg.PAIRING_METHOD}")
         print(f"  Power Allocation: {self.cfg.POWER_ALLOC_METHOD}")
         print(f"  CIC Enabled: {self.cfg.ENABLE_CIC}")
-        print(f"  Target Rate: {self.cfg.TARGET_RATE_BPS/1e6:.1f} Mbps")
+        print(f"  Target Rate: {self.cfg.TARGET_RATE_BPS:.2f} bps/Hz")
         print(f"\nDQN Hyperparameters:")
         print(f"  Learning Rate: {self.cfg.RL_LEARNING_RATE}")
         print(f"  Gamma: {self.cfg.RL_GAMMA}")
@@ -353,33 +353,61 @@ class NOMADQNTrainer:
         return self._compile_metrics(metrics, cache, phase)
     
     def _process_noma_pair(self, cache: DQNCache, weak_user: int, strong_user: int,
-                           weak_file: int, strong_file: int,
-                           channel_gains: np.ndarray, sinr_threshold: float,
-                           metrics: Dict, episode_done: bool, phase: str):
+                       weak_file: int, strong_file: int,
+                       channel_gains: np.ndarray, sinr_threshold: float,
+                       metrics: Dict, episode_done: bool, phase: str):
         """
         Process NOMA pair transmission with SIC/CIC (NOMA-AWARE).
+    
+        ✅ FIXED (Dec 12, 2025): Correct CIC detection logic
+    
+        Cache-Aided Interference Cancellation (CIC) Logic:
+        - Weak user can use CIC if STRONG user's file is cached (cancels strong's interference)
+        - Strong user can use CIC if WEAK user's file is cached (perfect SIC decoding)
+        - Power allocation uses OWN file cache status (priority assignment)
+        - SIC/CIC simulation uses PAIRED file cache status (interference cancellation)
+
+        Research References:
+        - IEEE TWC 2022: "Cache-Aided NOMA Mobile Edge Computing"
+        - arXiv:1712.09557: "Cache-Aided Non-Orthogonal Multiple Access"
+        - IEEE JSAC 2019: "Power Allocation in Cache-Aided NOMA Systems"
         """
         gain_w = channel_gains[weak_user]
         gain_s = channel_gains[strong_user]
-        
+
         metrics['noma_transmissions'] += 1
-        
-        # Check cache status for CIC
-        weak_cached = cache.is_hit(weak_file, update_stats=False)
-        strong_cached = cache.is_hit(strong_file, update_stats=False)
-        
-        # Power allocation (cache-aware)
+
+        # ========================================================================
+        # ✅ CRITICAL FIX: Separate cache checks for power allocation vs CIC
+        # ========================================================================
+
+        # Cache status for OWN requested files (affects power allocation priority)
+        weak_file_cached = cache.is_hit(weak_file, update_stats=False)
+        strong_file_cached = cache.is_hit(strong_file, update_stats=False)
+
+        # Cache status for PAIRED user's files (enables CIC capability)
+        # KEY INSIGHT: User can cancel interference if interferer's content is cached
+        weak_can_use_cic = cache.is_hit(strong_file, update_stats=False)  # Weak has strong's file
+        strong_can_use_cic = cache.is_hit(weak_file, update_stats=False)  # Strong has weak's file
+
+        # ========================================================================
+        # Power Allocation (uses OWN file cache status)
+        # ========================================================================
+        # Cached users may get higher/lower power based on cache-aware strategy
         p_weak, p_strong, feasible, _ = allocate_power(
             gain_w=gain_w,
             gain_s=gain_s,
             cfg=self.cfg,
             method=self.cfg.POWER_ALLOC_METHOD,
-            weak_cached=weak_cached,
-            strong_cached=strong_cached,
+            weak_cached=weak_file_cached,  # ✅ Weak user's own file status
+            strong_cached=strong_file_cached,  # ✅ Strong user's own file status
             grid_points=self.cfg.POWER_ALLOC_GRID
         )
-        
-        # Simulate SIC/CIC
+            
+        # ========================================================================
+        # Simulate SIC/CIC (uses PAIRED file cache status)
+        # ========================================================================
+        # CIC is enabled when user has interfering signal cached
         sic_results = simulate_sic_process(
             P_tx=self.cfg.TX_POWER,
             p_weak=p_weak,
@@ -389,30 +417,37 @@ class NOMADQNTrainer:
             noise=self.cfg.NOISE_POWER,
             target_sinr=sinr_threshold,
             imperfection_factor=self.cfg.SIC_IMPERFECTION,
-            weak_cached=weak_cached,
-            strong_cached=strong_cached
+            weak_cached=weak_can_use_cic,  # ✅ Weak's CIC capability
+            strong_cached=strong_can_use_cic  # ✅ Strong's CIC capability
         )
-        
+
         weak_success = sic_results['weak_success']
         strong_success = sic_results['strong_success']
-        
-        # Update metrics
+
+        # ========================================================================
+        # Update SIC Metrics
+        # ========================================================================
         metrics['sic_attempts'] += 1
         if sic_results['can_decode_weak']:
             metrics['sic_successes'] += 1
-        
-        # CIC tracking (NOVEL CONTRIBUTION)
-        if weak_cached:
-            metrics['cic_opportunities'] += 1
-            if strong_success:
-                metrics['cic_enabled_strong'] += 1
-        
-        if strong_cached:
+
+        # ========================================================================
+        # ✅ FIXED CIC Tracking (uses correct cache status)
+        # ========================================================================
+        # Track when CIC is actually beneficial (user succeeds with CIC help)
+        if weak_can_use_cic:
             metrics['cic_opportunities'] += 1
             if weak_success:
                 metrics['cic_enabled_weak'] += 1
-        
-        # Transmission outcomes
+
+        if strong_can_use_cic:
+            metrics['cic_opportunities'] += 1
+            if strong_success:
+                metrics['cic_enabled_strong'] += 1
+
+        # ========================================================================
+        # Transmission Outcomes
+        # ========================================================================
         if weak_success and strong_success:
             metrics['noma_successes'] += 1
         elif weak_success or strong_success:
@@ -421,14 +456,18 @@ class NOMADQNTrainer:
         else:
             metrics['noma_failures'] += 1
             metrics['outages'] += 2  # Both failed
-        
-        # Throughput and energy
+
+        # ========================================================================
+        # Throughput and Energy
+        # ========================================================================
         metrics['total_throughput'] += sic_results['sum_rate']
         metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
-        
-        # DQN Learning (only during training)
+
+        # ========================================================================
+        # DQN Learning (only during training phase)
+        # ========================================================================
         if phase == 'train' and hasattr(cache, 'request'):
-            # Weak user
+            # Weak user request (for DQN learning)
             cache.request(
                 item=weak_file,
                 user_id=weak_user,
@@ -441,20 +480,21 @@ class NOMADQNTrainer:
                 sinr_strong=sic_results['sinr_s_after'],
                 episode_done=episode_done
             )
-            
-            # Strong user
+
+            # Strong user request (for DQN learning)
             cache.request(
                 item=strong_file,
                 user_id=strong_user,
                 channel_gain=gain_s,
-                paired_user=weak_user,
-                paired_file=weak_file,
-                noma_success=strong_success,
-                outage=not strong_success,
-                sinr_weak=sic_results['sinr_w'],
-                sinr_strong=sic_results['sinr_s_after'],
-                episode_done=episode_done
-            )
+               paired_user=weak_user,
+               paired_file=weak_file,
+               noma_success=strong_success,
+               outage=not strong_success,
+               sinr_weak=sic_results['sinr_w'],
+               sinr_strong=sic_results['sinr_s_after'],
+               episode_done=episode_done
+           )
+
     
     def _process_single_user(self, cache: DQNCache, user_id: int, file_id: int,
                             channel_gains: np.ndarray, sinr_threshold: float,
@@ -494,7 +534,7 @@ class NOMADQNTrainer:
         """
         total_req = max(metrics['total_requests'], 1)
         total_noma = max(metrics['noma_transmissions'], 1)
-        total_noma_users = total_noma * 2
+        total_noma_users = max(total_noma * 2, 1)
         total_sic = max(metrics['sic_attempts'], 1)
         
         result = {
@@ -510,9 +550,11 @@ class NOMADQNTrainer:
             'sic_success_rate': metrics['sic_successes'] / total_sic,
             
             # CIC performance (NOVEL)
-            'cic_benefit_rate': (metrics['cic_enabled_weak'] + 
-                                 metrics['cic_enabled_strong']) / total_noma_users,
-            
+            'cic_benefit_rate': (
+                (metrics['cic_enabled_weak'] + metrics['cic_enabled_strong']) / total_noma_users 
+                if total_noma_users > 0 else 0.0
+            ),
+
             # Throughput
             'avg_throughput': metrics['total_throughput'] / total_req,
             'spectral_efficiency': metrics['total_throughput'] / total_noma,
