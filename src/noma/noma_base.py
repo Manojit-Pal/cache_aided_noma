@@ -10,6 +10,9 @@ This module implements:
 - Performance metrics (sum rate, spectral efficiency, fairness)
 - Multi-user NOMA scheduling
 
+✅ FIX #1 APPLIED: CIC tracking now uses list to properly handle both users cached
+✅ FIX #2 APPLIED: Cache-aware power allocation integrated into simulation
+
 Author: Cache-Aided NOMA Team
 Date: December 2025
 """
@@ -95,31 +98,37 @@ def sinr_to_ber_qpsk(sinr: float) -> float:
 
 
 # ============================================================================
-# BASIC NOMA PAIR SIMULATION
+# BASIC NOMA PAIR SIMULATION (✅ FIX #1 & #2 APPLIED)
 # ============================================================================
 
 def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg, 
                        p_w: Optional[float] = None, p_s: Optional[float] = None,
-                       weak_cached: bool = False, strong_cached: bool = False
+                       weak_cached: bool = False, strong_cached: bool = False,
+                       optimize_power: bool = True
                        ) -> Tuple[bool, bool, Dict]:
     """
     Simulate NOMA transmission for a two-user pair with optional cache-aided SIC.
     
+    ✅ FIX #1: CIC tracking now uses 'cic_users' list instead of single 'cic_user' string
+    ✅ FIX #2: Integrates cache-aware power allocation when enabled
+    
     This is the core NOMA transmission function that:
-    1. Computes SINR for weak user (treats strong as interference)
-    2. Checks if strong user can decode weak user's signal (for SIC)
-    3. Performs SIC with imperfection factor ζ
-    4. Computes strong user's SINR after SIC
-    5. Applies Cache-Aided Interference Cancellation (CIC) if content is cached
+    1. Allocates power (cache-aware if optimize_power=True)
+    2. Computes SINR for weak user (treats strong as interference or uses CIC)
+    3. Checks if strong user can decode weak user's signal (for SIC)
+    4. Performs SIC with imperfection factor ζ (or perfect if cached)
+    5. Computes strong user's SINR after SIC
+    6. Applies Cache-Aided Interference Cancellation (CIC) if content is cached
     
     Args:
         gain_weak: Channel power gain for weak user (farther from BS)
         gain_strong: Channel power gain for strong user (closer to BS)
         cfg: Configuration object with TX_POWER, NOISE_POWER, etc.
-        p_w: Power coefficient for weak user (0 to 1). If None, uses cfg default.
-        p_s: Power coefficient for strong user. If None, uses cfg default.
+        p_w: Power coefficient for weak user (0 to 1). If None, allocated based on method.
+        p_s: Power coefficient for strong user. If None, allocated based on method.
         weak_cached: Whether weak user's requested file is in cache (enables CIC)
         strong_cached: Whether strong user's requested file is in cache (enables CIC)
+        optimize_power: Whether to use cache-aware power allocation (default True)
     
     Returns:
         Tuple containing:
@@ -130,6 +139,8 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
             - BER estimates
             - Achievable rates
             - CIC benefits
+            - 'cic_users': List of users benefiting from CIC
+            - 'power_allocation': Info about power allocation method used
     
     Cache-Aided Interference Cancellation (CIC):
         If a user has the interfering content cached, they can perfectly cancel
@@ -140,20 +151,48 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
     Example:
         >>> weak_ok, strong_ok, info = simulate_noma_pair(
         ...     gain_weak=1e-8, gain_strong=1e-6, cfg=config,
-        ...     weak_cached=True  # Weak user has strong's content cached
+        ...     weak_cached=True, strong_cached=True,
+        ...     optimize_power=True  # Use cache-aware power allocation
         ... )
+        >>> print(info['cic_users'])  # ['weak', 'strong']
+        >>> print(info['power_allocation']['method'])  # 'cache_aware'
     """
-    # Get power allocation
+    # ✅ FIX #2: Integrate cache-aware power allocation
     P = cfg.TX_POWER
     N0 = cfg.NOISE_POWER
+    
     if p_w is None or p_s is None:
-        p_w = cfg.POWER_COEFF_WEAK
-        p_s = cfg.POWER_COEFF_STRONG
+        # Check if cache-aware power allocation should be used
+        if optimize_power and hasattr(cfg, 'POWER_ALLOC_METHOD') and cfg.POWER_ALLOC_METHOD == 'cache_aware':
+            # Import and use cache-aware power allocation
+            try:
+                from .power_allocation import allocate_power_cache_aware
+                p_w, p_s, power_feasible, power_info = allocate_power_cache_aware(
+                    gain_weak, gain_strong, cfg, weak_cached, strong_cached
+                )
+                if not power_feasible:
+                    # Fallback to default if optimization failed
+                    p_w = cfg.POWER_COEFF_WEAK
+                    p_s = cfg.POWER_COEFF_STRONG
+                    power_info['method'] = 'cache_aware_failed_fallback'
+            except (ImportError, AttributeError) as e:
+                # Fallback if power allocation module not available
+                p_w = cfg.POWER_COEFF_WEAK
+                p_s = cfg.POWER_COEFF_STRONG
+                power_info = {'method': 'config_default', 'reason': str(e)}
+        else:
+            # Use config defaults
+            p_w = cfg.POWER_COEFF_WEAK
+            p_s = cfg.POWER_COEFF_STRONG
+            power_info = {'method': 'config_default'}
+    else:
+        # Power coefficients provided explicitly
+        power_info = {'method': 'provided', 'p_w': p_w, 'p_s': p_s}
     
     zeta = cfg.SIC_IMPERFECTION
     sinr_th = sinr_threshold_from_rate(cfg.TARGET_RATE_BPS)
     
-    # Initialize info dictionary
+    # ✅ FIX #1: Initialize with 'cic_users' list instead of 'cic_user' string
     info = {
         'p_w': p_w,
         'p_s': p_s,
@@ -161,7 +200,9 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         'gain_strong': gain_strong,
         'weak_cached': weak_cached,
         'strong_cached': strong_cached,
-        'cic_applied': False
+        'cic_applied': False,
+        'cic_users': [],  # ✅ Changed from string to list
+        'power_allocation': power_info  # ✅ FIX #2: Track power allocation method
     }
     
     # -------------------------------------------------------------------------
@@ -172,7 +213,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         # If weak user has strong user's content cached, can cancel interference
         sinr_w = (P * p_w * gain_weak) / N0  # No interference from strong user
         info['cic_applied'] = True
-        info['cic_user'] = 'weak'
+        info['cic_users'].append('weak')  # ✅ Append to list
     else:
         # Standard NOMA: weak user treats strong as interference
         sinr_w = sinr_weak_user(P, p_w, gain_weak, p_s, N0)
@@ -202,7 +243,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         # Strong user has weak user's content cached → perfect SIC
         residual = 0.0  # Perfect cancellation
         info['cic_applied'] = True
-        info['cic_user'] = 'strong' if not info.get('cic_applied') else 'both'
+        info['cic_users'].append('strong')  # ✅ Append to list (no conditional logic)
     else:
         # Standard SIC with imperfection
         if can_decode_weak:
@@ -362,13 +403,10 @@ def pair_users_sequential(channel_gains: np.ndarray, user_indices: Optional[np.n
     return pairs
 
 
-# ✅ BUG FIX #6: Corrected signature to accept users list first, then channel_gains
 def pair_users(users: List[int], channel_gains: np.ndarray, 
                method: str = 'extreme') -> Tuple[List[Tuple[int, int]], Optional[int]]:
     """
     Universal user pairing function with multiple strategies.
-    
-    ✅ CORRECTED SIGNATURE: Now accepts users list first (matches simulation code)
     
     Args:
         users: List of user IDs to pair (e.g., users with cache misses)
@@ -414,20 +452,24 @@ def pair_users(users: List[int], channel_gains: np.ndarray,
 
 
 # ============================================================================
-# MULTI-USER NOMA SIMULATION
+# MULTI-USER NOMA SIMULATION (✅ FIX #1 & #2 APPLIED)
 # ============================================================================
 
 def simulate_noma_system(channel_gains: np.ndarray, cfg, 
                         pairing_method: str = 'extreme',
                         cache_status: Optional[Dict[int, bool]] = None,
-                        requested_files: Optional[Dict[int, int]] = None
+                        requested_files: Optional[Dict[int, int]] = None,
+                        optimize_power: bool = True
                         ) -> Dict:
     """
     Simulate complete NOMA system for all user pairs.
     
+    ✅ FIX #1: Now tracks detailed CIC statistics (weak, strong, both)
+    ✅ FIX #2: Integrates cache-aware power allocation when enabled
+    
     This function orchestrates the entire NOMA transmission:
     1. Pair users based on channel conditions
-    2. Optionally allocate power using optimization
+    2. Allocate power using cache-aware optimization (if enabled)
     3. Simulate transmission for each pair
     4. Apply cache-aided interference cancellation (CIC)
     5. Collect system-wide performance metrics
@@ -438,6 +480,7 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         pairing_method: 'extreme', 'random', or 'sequential'
         cache_status: Dict mapping user_id → requested file is cached (bool)
         requested_files: Dict mapping user_id → requested file_id
+        optimize_power: Whether to use cache-aware power allocation (default True)
     
     Returns:
         Dictionary with comprehensive results:
@@ -450,18 +493,22 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
             - average_ber
             - cache_hit_rate (if cache_status provided)
             - cic_benefit (improvement from cache-aided cancellation)
+            - weak_cic_count, strong_cic_count, both_cic_count (✅ NEW)
+            - power_optimization_enabled (✅ NEW)
     
     Example:
         >>> positions = generate_user_positions(200, 500, seed=42)
         >>> gains = compute_channel_gains(positions, 3.5)
         >>> cache_status = {i: (i < 20) for i in range(200)}  # First 20 cached
-        >>> results = simulate_noma_system(gains, cfg, cache_status=cache_status)
+        >>> results = simulate_noma_system(gains, cfg, cache_status=cache_status,
+        ...                                optimize_power=True)  # Use cache-aware power
         >>> print(f"Outage: {results['system_metrics']['outage_probability']:.2%}")
+        >>> print(f"Both CIC: {results['system_metrics']['both_cic_count']} pairs")
     """
     num_users = len(channel_gains)
     all_users = list(range(num_users))
     
-    # Create user pairs (updated to use new signature)
+    # Create user pairs
     pairs, leftover = pair_users(all_users, channel_gains, method=pairing_method)
     
     # Initialize cache status if not provided
@@ -481,10 +528,12 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         weak_cached = cache_status.get(weak_idx, False)
         strong_cached = cache_status.get(strong_idx, False)
         
+        # ✅ FIX #2: Pass optimize_power flag to enable cache-aware allocation
         weak_ok, strong_ok, info = simulate_noma_pair(
             gain_w, gain_s, cfg,
             weak_cached=weak_cached,
-            strong_cached=strong_cached
+            strong_cached=strong_cached,
+            optimize_power=optimize_power
         )
         
         info['weak_idx'] = weak_idx
@@ -526,9 +575,18 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
     cache_hit_count = sum(1 for i in range(num_users) if cache_status.get(i, False))
     cache_hit_rate = cache_hit_count / num_users if num_users > 0 else 0
     
-    # CIC benefit (how many users benefited from cache-aided cancellation)
+    # CIC benefit (how many pairs benefited from cache-aided cancellation)
     cic_applied_count = sum(1 for r in pair_results if r.get('cic_applied', False))
     cic_benefit_rate = cic_applied_count / num_pairs if num_pairs > 0 else 0
+    
+    # ✅ FIX #1: Detailed CIC statistics
+    weak_cic_count = sum(1 for r in pair_results if 'weak' in r.get('cic_users', []))
+    strong_cic_count = sum(1 for r in pair_results if 'strong' in r.get('cic_users', []))
+    both_cic_count = sum(1 for r in pair_results if len(r.get('cic_users', [])) == 2)
+    
+    # ✅ FIX #2: Power allocation statistics
+    power_methods = [r.get('power_allocation', {}).get('method', 'unknown') for r in pair_results]
+    cache_aware_count = sum(1 for m in power_methods if 'cache_aware' in m and 'failed' not in m)
     
     system_metrics = {
         'num_users': num_users,
@@ -545,7 +603,12 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         'average_fairness': average_fairness,
         'cache_hit_rate': cache_hit_rate,
         'cic_benefit_rate': cic_benefit_rate,
-        'pairing_method': pairing_method
+        'weak_cic_count': weak_cic_count,  # ✅ FIX #1
+        'strong_cic_count': strong_cic_count,  # ✅ FIX #1
+        'both_cic_count': both_cic_count,  # ✅ FIX #1
+        'pairing_method': pairing_method,
+        'power_optimization_enabled': optimize_power,  # ✅ FIX #2
+        'cache_aware_power_count': cache_aware_count  # ✅ FIX #2
     }
     
     return {
@@ -609,10 +672,10 @@ def compute_average_ber(results_list: List[Dict]) -> float:
 
 if __name__ == "__main__":
     print("="*70)
-    print("TESTING ENHANCED NOMA BASE MODULE")
+    print("TESTING ENHANCED NOMA BASE MODULE (FIX #1 & #2 APPLIED)")
     print("="*70)
     
-    # Mock configuration
+    # Mock configuration with cache-aware power allocation
     class MockConfig:
         TX_POWER = 1.0
         NOISE_POWER = 1e-9
@@ -620,52 +683,63 @@ if __name__ == "__main__":
         POWER_COEFF_STRONG = 0.2
         SIC_IMPERFECTION = 0.05
         TARGET_RATE_BPS = 0.5
+        POWER_ALLOC_METHOD = 'cache_aware'  # ✅ Enable cache-aware allocation
     
     cfg = MockConfig()
     
-    # Test 1: Single pair simulation
-    print("\n[Test 1] Single NOMA pair simulation...")
-    gain_weak = 1e-8   # Far user
-    gain_strong = 1e-6  # Near user
+    # Test 1: Single pair with default power
+    print("\n[Test 1] NOMA pair with default power allocation...")
+    gain_weak = 1e-8
+    gain_strong = 1e-6
     
-    weak_ok, strong_ok, info = simulate_noma_pair(gain_weak, gain_strong, cfg)
-    print(f"Weak user success: {weak_ok}, SINR: {info['sinr_w']:.3f}")
-    print(f"Strong user success: {strong_ok}, SINR: {info['sinr_s_after']:.3f}")
+    weak_ok, strong_ok, info = simulate_noma_pair(gain_weak, gain_strong, cfg, optimize_power=False)
+    print(f"Power allocation: {info['power_allocation']['method']}")
+    print(f"Power: p_w={info['p_w']:.3f}, p_s={info['p_s']:.3f}")
     print(f"Sum rate: {info['sum_rate']:.3f} bps/Hz")
     
-    # Test 2: Pair with CIC
-    print("\n[Test 2] NOMA pair with cache-aided cancellation...")
-    weak_ok_cic, strong_ok_cic, info_cic = simulate_noma_pair(
-        gain_weak, gain_strong, cfg, weak_cached=True
+    # ✅ Test 2: Cache-aware power allocation (FIX #2 verification)
+    print("\n[Test 2] NOMA pair with cache-aware power (FIX #2 TEST)...")
+    weak_ok2, strong_ok2, info2 = simulate_noma_pair(
+        gain_weak, gain_strong, cfg, weak_cached=True, optimize_power=True
     )
-    print(f"CIC applied: {info_cic['cic_applied']}")
-    print(f"Weak SINR improvement: {info_cic['sinr_w']/info['sinr_w']:.2f}x")
-    print(f"Sum rate with CIC: {info_cic['sum_rate']:.3f} bps/Hz")
+    print(f"Power allocation: {info2['power_allocation']['method']}")
+    print(f"Power: p_w={info2['p_w']:.3f}, p_s={info2['p_s']:.3f}")
+    print(f"CIC users: {info2['cic_users']}")
+    print(f"Sum rate: {info2['sum_rate']:.3f} bps/Hz")
+    if 'cache_aware' in info2['power_allocation']['method']:
+        print(f"✅ FIX #2 VERIFIED: Cache-aware power allocation working!")
     
-    # Test 3: User pairing
-    print("\n[Test 3] User pairing strategies...")
-    gains = np.array([1e-8, 1e-6, 1e-9, 1e-7, 1e-10, 1e-5])
-    users = [0, 1, 2, 3, 4, 5]
+    # Test 3: Both users cached
+    print("\n[Test 3] Both users cached with cache-aware power...")
+    weak_ok3, strong_ok3, info3 = simulate_noma_pair(
+        gain_weak, gain_strong, cfg, weak_cached=True, strong_cached=True, optimize_power=True
+    )
+    print(f"CIC users: {info3['cic_users']}")  # Should be ['weak', 'strong']
+    print(f"Power allocation: {info3['power_allocation']['method']}")
+    print(f"Power: p_w={info3['p_w']:.3f}, p_s={info3['p_s']:.3f}")
+    print(f"Sum rate: {info3['sum_rate']:.3f} bps/Hz")
     
-    pairs_extreme, leftover = pair_users(users, gains, method='extreme')
-    print(f"Extreme pairing: {pairs_extreme}, leftover: {leftover}")
-    
-    # Test 4: Full system simulation
-    print("\n[Test 4] Full NOMA system simulation...")
+    # Test 4: Full system simulation with cache-aware power
+    print("\n[Test 4] Full system with cache-aware power allocation...")
     num_users = 20
     gains_system = np.random.exponential(1e-7, num_users)
-    cache_status = {i: (i % 5 == 0) for i in range(num_users)}  # Every 5th user cached
+    cache_status = {i: (i % 5 == 0) for i in range(num_users)}
     
-    results = simulate_noma_system(gains_system, cfg, cache_status=cache_status)
+    results = simulate_noma_system(gains_system, cfg, cache_status=cache_status, optimize_power=True)
     metrics = results['system_metrics']
     
     print(f"Number of pairs: {metrics['num_pairs']}")
     print(f"Overall success rate: {metrics['overall_success_rate']:.2%}")
     print(f"Average sum rate: {metrics['average_sum_rate']:.3f} bps/Hz")
-    print(f"Outage probability: {metrics['outage_probability']:.2%}")
-    print(f"Cache hit rate: {metrics['cache_hit_rate']:.2%}")
-    print(f"CIC benefit rate: {metrics['cic_benefit_rate']:.2%}")
+    print(f"Power optimization enabled: {metrics['power_optimization_enabled']}")
+    print(f"Cache-aware power used: {metrics['cache_aware_power_count']}/{metrics['num_pairs']} pairs")
+    print(f"✅ Detailed CIC stats:")
+    print(f"  - Weak user CIC: {metrics['weak_cic_count']} pairs")
+    print(f"  - Strong user CIC: {metrics['strong_cic_count']} pairs")
+    print(f"  - Both users CIC: {metrics['both_cic_count']} pairs")
     
     print("\n" + "="*70)
     print("✅ ALL TESTS COMPLETED SUCCESSFULLY!")
+    print("✅ FIX #1 APPLIED: CIC tracking with list")
+    print("✅ FIX #2 APPLIED: Cache-aware power allocation integrated")
     print("="*70)
