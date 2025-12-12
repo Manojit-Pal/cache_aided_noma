@@ -2,43 +2,39 @@
 """
 Comprehensive Comparative Analysis: Cache-Aided NOMA vs Traditional Systems
 
-This module implements research-validated comparative studies based on:
+✅ AUTO-TRAINS DQN IF NEEDED (Dec 12, 2025)
+
+This module implements research-validated comparative studies with automatic
+DQN training integration. If DQN checkpoint doesn't exist, it will train
+automatically before running comparisons.
+
+Research References:
 - arXiv:1712.09557 (2018): "Cache-Aided Non-Orthogonal Multiple Access"
 - arXiv:1909.11074 (2019): "Power Allocation in Cache-Aided NOMA"
 - IEEE Survey (2022): "A Survey on Applications of Cache-Aided NOMA"
 - arXiv:2209.07809 (2022): "M2DQN - DQN training requirements"
 
-Key Research Contributions Validated:
-1. CIC (Cache-aided Interference Cancellation) benefit quantification
-2. Achievable rate region expansion with caching
-3. SIC performance improvement with cache assistance
-4. Multi-policy comparison (TopK, LRU, LFU, Random vs NO-CACHE)
-5. Energy efficiency and fairness analysis
+Key Features:
+1. ✅ Automatic DQN checkpoint detection
+2. ✅ Auto-training if checkpoint missing (with user approval)
+3. ✅ Fair comparison: all policies optimized (including DQN)
+4. ✅ Complete 6-policy analysis: TopK, LRU, LFU, Random, NO-CACHE, DQN
+5. ✅ 9 comprehensive metrics with BER for both users
 
-IMPORTANT: DQN is NOT included in this comparison because:
-- Untrained DQN = random policy = NO caching benefit
-- DQN requires 10K-100K episodes to train (see stable_dqn_sim.py)
-- Research shows: DQN needs "millions of frames" to converge
-- Use src/simulation/stable_dqn_sim.py for DQN training & comparison
-
-Metrics Analyzed (vs SNR):
-- Sum-Rate (wireless tx + cache delivery)
-- Individual User Rates (weak/strong)
-- Outage Probability
-- BER (Bit Error Rate) - both users
-- Cache Hit Probability
-- Spectral Efficiency
-- Energy Efficiency
-- Fairness (Jain's Index)
+Workflow:
+- First run: Auto-trains DQN (1000 episodes, ~10-30 min)
+- Subsequent runs: Loads trained DQN checkpoint
+- Results: Publication-ready comparison plots
 
 Outputs:
 - cache_aided_vs_traditional_noma.png: Main comparison (9 subplots)
 - results_comparative_analysis.csv: Complete dataset
 - performance_summary.txt: Statistical summary
+- models/dqn_cache/dqn_cache_final.pth: Trained DQN checkpoint
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 3.3 (FIXED: Removed untrained DQN, added BER Strong)
+Version: 4.0 (AUTO-TRAIN DQN Integration)
 """
 
 import numpy as np
@@ -51,6 +47,7 @@ from collections import Counter, defaultdict
 from typing import Dict, List, Tuple, Optional
 import os
 import warnings
+import sys
 warnings.filterwarnings('ignore')
 
 # Project imports
@@ -77,12 +74,144 @@ from src.caching import (
     RandomCache
 )
 
-# Try DQN import (but won't use untrained)
+# Try DQN import
 try:
     from src.caching import DQNCache
     HAS_DQN = True
 except ImportError:
     HAS_DQN = False
+    print("⚠️  DQN not available - will skip DQN comparison")
+
+
+# ============================================================================
+# DQN TRAINING INTEGRATION
+# ============================================================================
+
+def check_dqn_checkpoint() -> Optional[str]:
+    """
+    Check if trained DQN checkpoint exists.
+    
+    Returns:
+        Path to checkpoint if exists, None otherwise
+    """
+    checkpoint_path = 'models/dqn_cache/dqn_cache_final.pth'
+    
+    if os.path.exists(checkpoint_path):
+        return checkpoint_path
+    
+    # Try alternative location
+    alt_path = 'models/dqn_cache/dqn_cache_best_ep999.pth'
+    if os.path.exists(alt_path):
+        return alt_path
+    
+    return None
+
+
+def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
+    """
+    Automatically train DQN cache.
+    
+    Args:
+        cfg: Configuration object
+        num_episodes: Number of training episodes
+    
+    Returns:
+        Path to saved checkpoint or None if training failed
+    """
+    if not HAS_DQN:
+        print("❌ Error: DQN not available for training")
+        return None
+    
+    try:
+        # Import trainer
+        from src.simulation.stable_dqn_sim import NOMADQNTrainer
+        
+        print("\n" + "#"*80)
+        print("#" + " "*20 + "AUTO-TRAINING DQN CACHE" + " "*24 + "#")
+        print("#"*80)
+        print(f"\nNo trained DQN checkpoint found.")
+        print(f"Training will take approximately 10-30 minutes.")
+        print(f"Episodes: {num_episodes}")
+        print(f"\nResults will be saved to: models/dqn_cache/dqn_cache_final.pth")
+        print(f"\nPress Ctrl+C to cancel and run without DQN.\n")
+        
+        # User confirmation
+        response = input("Proceed with DQN training? [Y/n]: ").strip().lower()
+        if response and response not in ['y', 'yes']:
+            print("\n⚠️  Skipping DQN training. Will run comparison without DQN.")
+            return None
+        
+        print("\n✅ Starting DQN training...\n")
+        
+        # Create trainer
+        trainer = NOMADQNTrainer(cfg)
+        
+        # Train
+        trained_cache, train_history = trainer.train(
+            num_episodes=num_episodes,
+            test_interval=50,
+            save_best=True
+        )
+        
+        # Check if checkpoint was created
+        checkpoint_path = check_dqn_checkpoint()
+        
+        if checkpoint_path:
+            print(f"\n✅ DQN training complete!")
+            print(f"   Checkpoint saved: {checkpoint_path}")
+            return checkpoint_path
+        else:
+            print(f"\n⚠️  Training completed but checkpoint not found.")
+            return None
+    
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Training cancelled by user.")
+        return None
+    
+    except Exception as e:
+        print(f"\n❌ Error during DQN training: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def load_trained_dqn(checkpoint_path: str, cfg) -> Optional[object]:
+    """
+    Load trained DQN cache from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to .pth checkpoint
+        cfg: Configuration object
+    
+    Returns:
+        Loaded DQN cache or None if loading failed
+    """
+    if not HAS_DQN:
+        return None
+    
+    try:
+        # Create DQN cache instance
+        cache = DQNCache(
+            capacity=cfg.CACHE_SIZE,
+            num_files=cfg.NUM_FILES,
+            num_users=cfg.NUM_USERS,
+            learning_rate=cfg.RL_LEARNING_RATE,
+            gamma=cfg.RL_GAMMA,
+            seed=cfg.RANDOM_SEED
+        )
+        
+        # Load weights
+        cache.load_model(checkpoint_path)
+        
+        # Set to evaluation mode (no exploration, no learning)
+        cache.set_eval_mode(True)
+        
+        print(f"✅ Loaded trained DQN from: {checkpoint_path}")
+        return cache
+    
+    except Exception as e:
+        print(f"❌ Error loading DQN checkpoint: {e}")
+        return None
 
 
 # ============================================================================
@@ -93,15 +222,16 @@ class CacheAidedNOMAAnalysis:
     """
     Research-validated comparative analysis engine.
     
-    Compares:
-    - Cache-Aided NOMA (TopK, LRU, LFU, Random)
-    - Traditional NOMA (no cache)
+    ✅ NOW INCLUDES TRAINED DQN (not random!)
     
-    NOTE: DQN is excluded - use stable_dqn_sim.py for DQN experiments
+    Compares:
+    - Cache-Aided NOMA (TopK, LRU, LFU, Random, DQN)
+    - Traditional NOMA (no cache)
     """
     
     def __init__(self, cfg, snr_range_db: np.ndarray = None, 
-                 num_realizations: int = 1000):
+                 num_realizations: int = 1000,
+                 trained_dqn_cache: Optional[object] = None):
         """
         Initialize analysis engine.
         
@@ -109,20 +239,24 @@ class CacheAidedNOMAAnalysis:
             cfg: Configuration object
             snr_range_db: SNR values to test (dB)
             num_realizations: Monte Carlo runs per SNR
+            trained_dqn_cache: Pre-trained DQN cache instance
         """
         self.cfg = cfg
         self.snr_db_range = snr_range_db if snr_range_db is not None else np.arange(-10, 31, 2)
         self.num_realizations = num_realizations
+        self.trained_dqn_cache = trained_dqn_cache
         
         # Results storage
         self.results = defaultdict(list)
         
-        print(f"✅ CacheAidedNOMAAnalysis initialized")
+        print(f"\n✅ CacheAidedNOMAAnalysis initialized")
         print(f"   SNR range: {self.snr_db_range[0]} to {self.snr_db_range[-1]} dB")
         print(f"   Realizations: {self.num_realizations}")
-        print(f"   Policies: TopK, LRU, LFU, Random, NO-CACHE")
-        print(f"\n⚠️  NOTE: DQN excluded (requires pre-training)")
-        print(f"   For DQN experiments, use: python -m src.simulation.stable_dqn_sim\n")
+        
+        policies_list = ['TopK', 'LRU', 'LFU', 'Random', 'NO-CACHE']
+        if trained_dqn_cache is not None:
+            policies_list.append('DQN (trained)')
+        print(f"   Policies: {', '.join(policies_list)}\n")
     
     def db_to_linear(self, db_value):
         """Convert dB to linear scale."""
@@ -149,17 +283,19 @@ class CacheAidedNOMAAnalysis:
         """
         Create cache instance for given policy.
         
-        Args:
-            policy: 'topk', 'lru', 'lfu', 'random', or 'none'
-            requests: File requests for popularity estimation
-        
-        Returns:
-            Cache instance or None
+        ✅ FIXED: Uses trained DQN if available
         """
         if policy is None or policy == 'none':
             return None
         
-        # Non-DQN caches only
+        if policy == 'dqn':
+            if self.trained_dqn_cache is None:
+                print("⚠️  Warning: DQN requested but no trained cache available")
+                return None
+            # Return the pre-trained DQN cache (already in eval mode)
+            return self.trained_dqn_cache
+        
+        # Non-DQN caches
         cache = create_cache(policy, capacity=self.cfg.CACHE_SIZE)
         
         # Populate static caches
@@ -171,23 +307,16 @@ class CacheAidedNOMAAnalysis:
         return cache
     
     def generate_user_pair_channels(self, snr_db: float, seed: int = None) -> Tuple:
-        """
-        Generate channel gains for weak-strong user pair.
-        
-        Returns:
-            gain_weak, gain_strong, noise_power
-        """
+        """Generate channel gains for weak-strong user pair."""
         if seed is not None:
             set_seed(seed)
         
-        # Generate 2 users
         positions = generate_user_positions(
             num_users=2,
             cell_radius=self.cfg.CELL_RADIUS,
             seed=seed
         )
         
-        # Compute channel gains
         channel_gains = compute_channel_gains(
             positions,
             exponent=self.cfg.PATHLOSS_EXPONENT,
@@ -196,11 +325,9 @@ class CacheAidedNOMAAnalysis:
             los_probability=self.cfg.LOS_PROBABILITY
         )
         
-        # Assign weak/strong based on channel quality
         gain_weak = np.min(channel_gains)
         gain_strong = np.max(channel_gains)
         
-        # Compute noise power for target SNR
         gain_avg = np.mean(channel_gains)
         noise_power = self.cfg.TX_POWER * gain_avg / self.db_to_linear(snr_db)
         
@@ -209,12 +336,7 @@ class CacheAidedNOMAAnalysis:
     def simulate_noma_transmission(self, gain_weak: float, gain_strong: float,
                                    noise_power: float, cache = None,
                                    file_weak: int = 0, file_strong: int = 1) -> Dict:
-        """
-        Simulate NOMA transmission with optional cache assistance.
-        
-        Returns:
-            Dictionary with detailed metrics
-        """
+        """Simulate NOMA transmission with optional cache assistance."""
         # Check cache status
         if cache is not None:
             cache_hit_weak = cache.is_hit(file_weak, update_stats=False)
@@ -272,11 +394,10 @@ class CacheAidedNOMAAnalysis:
             strong_cached=cache_hit_strong
         )
         
-        # Extract results
         weak_success = sic_results['weak_success']
         strong_success = sic_results['strong_success']
         
-        # Compute Rates (account for cache hits)
+        # Compute Rates
         cache_rate = getattr(self.cfg, 'CACHE_DELIVERY_RATE', self.cfg.TARGET_RATE_BPS)
         
         if cache_hit_weak:
@@ -339,9 +460,7 @@ class CacheAidedNOMAAnalysis:
     
     def run_single_snr(self, snr_db: float, policy: str = 'topk',
                        seed_offset: int = 0) -> Dict:
-        """
-        Run Monte Carlo simulations for a single SNR point.
-        """
+        """Run Monte Carlo simulations for a single SNR point."""
         # Generate file requests for cache setup
         requests = sample_zipf_catalog(
             self.cfg.NUM_FILES,
@@ -381,7 +500,7 @@ class CacheAidedNOMAAnalysis:
             for key, value in result.items():
                 metrics[key].append(value)
         
-        # Aggregate statistics with 95% CI
+        # Aggregate statistics
         def compute_stats(arr):
             arr = np.array(arr)
             mean = arr.mean()
@@ -410,14 +529,14 @@ class CacheAidedNOMAAnalysis:
             aggregated['cic_benefit_mean'] / max(aggregated['cic_opportunity_mean'], 1)
         )
         
-        # Fairness (Jain's Index)
+        # Fairness
         fairness_values = []
         for i in range(self.num_realizations):
             rates = [metrics['rate_weak'][i], metrics['rate_strong'][i]]
             fairness_values.append(self.compute_jains_fairness(rates))
         aggregated['fairness_mean'] = np.mean(fairness_values)
         
-        # Energy efficiency (bits/Joule)
+        # Energy efficiency
         total_energy = aggregated['energy_mean'] * self.num_realizations
         total_bits = aggregated['sum_rate_mean'] * self.num_realizations
         aggregated['energy_efficiency'] = total_bits / max(total_energy, 1e-12)
@@ -425,24 +544,36 @@ class CacheAidedNOMAAnalysis:
         return aggregated
     
     def run_full_comparison(self, policies: List[str] = None) -> pd.DataFrame:
-        """
-        Run comprehensive comparison across all SNR points and policies.
-        """
+        """Run comprehensive comparison."""
         if policies is None:
-            # ✅ FIXED: Exclude DQN (untrained = random = no benefit)
             policies = ['topk', 'lru', 'lfu', 'random', 'none']
+            if self.trained_dqn_cache is not None:
+                policies.append('dqn')
         
         print(f"\n{'='*70}")
         print("RUNNING COMPREHENSIVE COMPARISON")
         print(f"{'='*70}")
-        print(f"Policies: {', '.join([p.upper() if p != 'none' else 'NO-CACHE' for p in policies])}")
+        
+        policy_names = []
+        for p in policies:
+            if p == 'none':
+                policy_names.append('NO-CACHE')
+            elif p == 'dqn':
+                policy_names.append('DQN (trained)')
+            else:
+                policy_names.append(p.upper())
+        
+        print(f"Policies: {', '.join(policy_names)}")
         print(f"SNR range: {self.snr_db_range[0]} to {self.snr_db_range[-1]} dB")
         print(f"Monte Carlo runs per point: {self.num_realizations}\n")
         
         all_results = []
         
         for policy in policies:
-            policy_name = policy if policy != 'none' else 'NO-CACHE'
+            policy_name = policy.upper() if policy != 'none' else 'NO-CACHE'
+            if policy == 'dqn':
+                policy_name = 'DQN (trained)'
+            
             print(f"\nProcessing {policy_name} policy...")
             
             for idx, snr_db in enumerate(self.snr_db_range):
@@ -455,7 +586,7 @@ class CacheAidedNOMAAnalysis:
                 )
                 all_results.append(result)
             
-            print(f"  ✅ {policy_name} completed")
+            print(f"  ✅ {policy_name} completed" + " "*30)
         
         df = pd.DataFrame(all_results)
         
@@ -472,9 +603,9 @@ class CacheAidedNOMAAnalysis:
     
     def plot_main_comparison(self, df: pd.DataFrame, save_path: str = None):
         """
-        Create comprehensive 9-subplot comparison figure.
+        Create comprehensive 9-subplot comparison.
         
-        ✅ FIXED: Added BER Strong User, improved NO-CACHE visibility
+        ✅ INCLUDES TRAINED DQN (distinct from NO-CACHE)
         """
         fig = plt.figure(figsize=(20, 14))
         fig.suptitle('Cache-Aided NOMA vs Traditional NOMA: Comprehensive Analysis',
@@ -482,76 +613,90 @@ class CacheAidedNOMAAnalysis:
         
         policies = df['policy'].unique()
         
-        # ✅ FIXED: Custom color scheme for better NO-CACHE visibility
+        # ✅ FIXED: Distinct colors for DQN and NO-CACHE
         policy_colors = {
             'topk': '#1f77b4',      # Blue
             'lru': '#2ca02c',       # Green
             'lfu': '#9467bd',       # Purple
             'random': '#ff7f0e',    # Orange
-            'none': '#FFD700'       # YELLOW (bright, visible)
+            'none': '#FFD700',      # YELLOW (NO-CACHE baseline)
+            'dqn': '#00CED1'        # CYAN (trained DQN)
         }
         
-        # Custom markers
         policy_markers = {
             'topk': 'o',
             'lru': 's',
             'lfu': '^',
             'random': 'D',
-            'none': 'P'  # Plus marker for NO-CACHE
+            'none': 'P',   # Plus for NO-CACHE
+            'dqn': '*'     # Star for DQN
         }
         
-        # Line widths
         def get_linewidth(policy):
-            return 3.0 if policy == 'none' else 2.0
+            return 3.0 if policy == 'none' else 2.5 if policy == 'dqn' else 2.0
         
-        # 1. Sum-Rate vs SNR
+        def get_label(policy):
+            if policy == 'none':
+                return 'NO-CACHE'
+            elif policy == 'dqn':
+                return 'DQN (trained)'
+            else:
+                return policy.upper()
+        
+        # Helper function for plotting
+        def plot_metric(ax, metric, title, ylabel, log_scale=False):
+            for policy in policies:
+                data = df[df['policy'] == policy]
+                label = get_label(policy)
+                
+                if log_scale:
+                    ax.semilogy(data['snr_db'], data[metric],
+                               marker=policy_markers.get(policy, 'o'),
+                               label=label,
+                               color=policy_colors.get(policy, 'gray'),
+                               linewidth=get_linewidth(policy),
+                               markersize=6)
+                else:
+                    ax.plot(data['snr_db'], data[metric],
+                           marker=policy_markers.get(policy, 'o'),
+                           label=label,
+                           color=policy_colors.get(policy, 'gray'),
+                           linewidth=get_linewidth(policy),
+                           markersize=6)
+                    
+                    # Add CI if available
+                    ci_key = metric.replace('_mean', '_ci95')
+                    if ci_key in data.columns:
+                        ax.fill_between(data['snr_db'],
+                                       data[metric] - data[ci_key],
+                                       data[metric] + data[ci_key],
+                                       alpha=0.15,
+                                       color=policy_colors.get(policy, 'gray'))
+            
+            ax.set_xlabel('SNR (dB)', fontsize=11)
+            ax.set_ylabel(ylabel, fontsize=11)
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3, which='both' if log_scale else 'major')
+            ax.legend(fontsize=9, loc='best')
+        
+        # 1. Sum-Rate
         ax1 = plt.subplot(3, 3, 1)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax1.plot(data['snr_db'], data['sum_rate_mean'], 
-                    marker=policy_markers.get(policy, 'o'), 
-                    label=label, 
-                    color=policy_colors.get(policy, 'gray'), 
-                    linewidth=get_linewidth(policy),
-                    markersize=6)
-            ax1.fill_between(data['snr_db'],
-                           data['sum_rate_mean'] - data['sum_rate_ci95'],
-                           data['sum_rate_mean'] + data['sum_rate_ci95'],
-                           alpha=0.15, color=policy_colors.get(policy, 'gray'))
-        ax1.set_xlabel('SNR (dB)', fontsize=11)
-        ax1.set_ylabel('Sum-Rate (bps/Hz)', fontsize=11)
-        ax1.set_title('Sum-Rate vs SNR', fontsize=12, fontweight='bold')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(fontsize=9, loc='best')
+        plot_metric(ax1, 'sum_rate_mean', 'Sum-Rate vs SNR', 'Sum-Rate (bps/Hz)')
         
-        # 2. Outage Probability vs SNR
+        # 2. Outage Probability
         ax2 = plt.subplot(3, 3, 2)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax2.semilogy(data['snr_db'], data['outage_probability'],
-                        marker=policy_markers.get(policy, 's'), 
-                        label=label, 
-                        color=policy_colors.get(policy, 'gray'),
-                        linewidth=get_linewidth(policy),
-                        markersize=6)
-        ax2.set_xlabel('SNR (dB)', fontsize=11)
-        ax2.set_ylabel('Outage Probability', fontsize=11)
-        ax2.set_title('Outage Probability vs SNR', fontsize=12, fontweight='bold')
-        ax2.grid(True, which='both', alpha=0.3)
-        ax2.legend(fontsize=9, loc='best')
+        plot_metric(ax2, 'outage_probability', 'Outage Probability vs SNR', 'Outage Probability', log_scale=True)
         
-        # 3. Cache Hit Rate vs SNR
+        # 3. Cache Hit Rate
         ax3 = plt.subplot(3, 3, 3)
         for policy in policies:
             if policy == 'none':
                 continue
             data = df[df['policy'] == policy]
-            label = policy.upper()
+            label = get_label(policy)
             ax3.plot(data['snr_db'], data['cache_hit_rate'],
-                    marker=policy_markers.get(policy, '^'), 
-                    label=label, 
+                    marker=policy_markers.get(policy, '^'),
+                    label=label,
                     color=policy_colors.get(policy, 'gray'),
                     linewidth=2.0,
                     markersize=6)
@@ -561,107 +706,29 @@ class CacheAidedNOMAAnalysis:
         ax3.grid(True, alpha=0.3)
         ax3.legend(fontsize=9, loc='best')
         
-        # 4. Weak User Rate vs SNR
+        # 4. Weak User Rate
         ax4 = plt.subplot(3, 3, 4)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax4.plot(data['snr_db'], data['rate_weak_mean'],
-                    marker=policy_markers.get(policy, 'o'), 
-                    label=label, 
-                    color=policy_colors.get(policy, 'gray'),
-                    linewidth=get_linewidth(policy),
-                    markersize=6)
-        ax4.set_xlabel('SNR (dB)', fontsize=11)
-        ax4.set_ylabel('Rate (bps/Hz)', fontsize=11)
-        ax4.set_title('Weak User Rate vs SNR', fontsize=12, fontweight='bold')
-        ax4.grid(True, alpha=0.3)
-        ax4.legend(fontsize=9, loc='best')
+        plot_metric(ax4, 'rate_weak_mean', 'Weak User Rate vs SNR', 'Rate (bps/Hz)')
         
-        # 5. Strong User Rate vs SNR
+        # 5. Strong User Rate
         ax5 = plt.subplot(3, 3, 5)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax5.plot(data['snr_db'], data['rate_strong_mean'],
-                    marker=policy_markers.get(policy, 's'), 
-                    label=label, 
-                    color=policy_colors.get(policy, 'gray'),
-                    linewidth=get_linewidth(policy),
-                    markersize=6)
-        ax5.set_xlabel('SNR (dB)', fontsize=11)
-        ax5.set_ylabel('Rate (bps/Hz)', fontsize=11)
-        ax5.set_title('Strong User Rate vs SNR', fontsize=12, fontweight='bold')
-        ax5.grid(True, alpha=0.3)
-        ax5.legend(fontsize=9, loc='best')
+        plot_metric(ax5, 'rate_strong_mean', 'Strong User Rate vs SNR', 'Rate (bps/Hz)')
         
-        # 6. BER vs SNR (Weak User)
+        # 6. BER Weak
         ax6 = plt.subplot(3, 3, 6)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax6.semilogy(data['snr_db'], data['ber_weak_mean'],
-                        marker=policy_markers.get(policy, '^'), 
-                        label=label, 
-                        color=policy_colors.get(policy, 'gray'),
-                        linewidth=get_linewidth(policy),
-                        markersize=6)
-        ax6.set_xlabel('SNR (dB)', fontsize=11)
-        ax6.set_ylabel('BER', fontsize=11)
-        ax6.set_title('BER vs SNR (Weak User)', fontsize=12, fontweight='bold')
-        ax6.grid(True, which='both', alpha=0.3)
-        ax6.legend(fontsize=9, loc='best')
+        plot_metric(ax6, 'ber_weak_mean', 'BER vs SNR (Weak User)', 'BER', log_scale=True)
         
-        # 7. BER vs SNR (Strong User) - ✅ ADDED!
+        # 7. BER Strong
         ax7 = plt.subplot(3, 3, 7)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax7.semilogy(data['snr_db'], data['ber_strong_mean'],
-                        marker=policy_markers.get(policy, 'D'), 
-                        label=label, 
-                        color=policy_colors.get(policy, 'gray'),
-                        linewidth=get_linewidth(policy),
-                        markersize=6)
-        ax7.set_xlabel('SNR (dB)', fontsize=11)
-        ax7.set_ylabel('BER', fontsize=11)
-        ax7.set_title('BER vs SNR (Strong User)', fontsize=12, fontweight='bold')
-        ax7.grid(True, which='both', alpha=0.3)
-        ax7.legend(fontsize=9, loc='best')
+        plot_metric(ax7, 'ber_strong_mean', 'BER vs SNR (Strong User)', 'BER', log_scale=True)
         
-        # 8. Fairness vs SNR
+        # 8. Fairness
         ax8 = plt.subplot(3, 3, 8)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax8.plot(data['snr_db'], data['fairness_mean'],
-                    marker=policy_markers.get(policy, '*'), 
-                    label=label, 
-                    color=policy_colors.get(policy, 'gray'),
-                    linewidth=get_linewidth(policy),
-                    markersize=8)
-        ax8.set_xlabel('SNR (dB)', fontsize=11)
-        ax8.set_ylabel("Jain's Fairness Index", fontsize=11)
-        ax8.set_title('Fairness vs SNR', fontsize=12, fontweight='bold')
-        ax8.grid(True, alpha=0.3)
-        ax8.legend(fontsize=9, loc='best')
+        plot_metric(ax8, 'fairness_mean', 'Fairness vs SNR', "Jain's Fairness Index")
         
-        # 9. Energy Efficiency vs SNR
+        # 9. Energy Efficiency
         ax9 = plt.subplot(3, 3, 9)
-        for policy in policies:
-            data = df[df['policy'] == policy]
-            label = policy.upper() if policy != 'none' else 'NO-CACHE'
-            ax9.plot(data['snr_db'], data['energy_efficiency'],
-                    marker=policy_markers.get(policy, 'P'), 
-                    label=label, 
-                    color=policy_colors.get(policy, 'gray'),
-                    linewidth=get_linewidth(policy),
-                    markersize=6)
-        ax9.set_xlabel('SNR (dB)', fontsize=11)
-        ax9.set_ylabel('Energy Efficiency (bits/J)', fontsize=11)
-        ax9.set_title('Energy Efficiency vs SNR', fontsize=12, fontweight='bold')
-        ax9.grid(True, alpha=0.3)
-        ax9.legend(fontsize=9, loc='best')
+        plot_metric(ax9, 'energy_efficiency', 'Energy Efficiency vs SNR', 'Energy Efficiency (bits/J)')
         
         plt.tight_layout(rect=[0, 0, 1, 0.99])
         
@@ -674,9 +741,7 @@ class CacheAidedNOMAAnalysis:
         plt.close()
     
     def save_results(self, df: pd.DataFrame, save_dir: str = 'results'):
-        """
-        Save results to CSV and generate summary report.
-        """
+        """Save results to CSV and generate summary."""
         os.makedirs(save_dir, exist_ok=True)
         
         # Save full dataset
@@ -684,7 +749,7 @@ class CacheAidedNOMAAnalysis:
         df.to_csv(csv_path, index=False)
         print(f"✅ Saved: {csv_path}")
         
-        # Generate summary report
+        # Generate summary
         summary_path = os.path.join(save_dir, 'performance_summary.txt')
         
         try:
@@ -693,7 +758,6 @@ class CacheAidedNOMAAnalysis:
                 f.write("CACHE-AIDED NOMA COMPARATIVE ANALYSIS SUMMARY\n")
                 f.write("="*70 + "\n\n")
                 
-                # High SNR performance
                 high_snr = df['snr_db'].max()
                 f.write(f"Performance at SNR = {high_snr} dB:\n")
                 f.write("-"*70 + "\n\n")
@@ -707,7 +771,13 @@ class CacheAidedNOMAAnalysis:
                         continue
                     
                     policy_row = policy_data.iloc[0]
-                    policy_name = policy.upper() if policy != 'none' else 'NO-CACHE'
+                    
+                    if policy == 'none':
+                        policy_name = 'NO-CACHE'
+                    elif policy == 'dqn':
+                        policy_name = 'DQN (trained)'
+                    else:
+                        policy_name = policy.upper()
                     
                     f.write(f"{policy_name}:\n")
                     f.write(f"  Sum-Rate: {policy_row['sum_rate_mean']:.4f} bps/Hz\n")
@@ -721,7 +791,7 @@ class CacheAidedNOMAAnalysis:
             print(f"✅ Saved: {summary_path}")
             
         except Exception as e:
-            print(f"⚠️  Warning: Could not generate summary report: {e}")
+            print(f"⚠️  Warning: Could not generate summary: {e}")
 
 
 # ============================================================================
@@ -730,38 +800,88 @@ class CacheAidedNOMAAnalysis:
 
 def main():
     """
-    Run comprehensive comparative analysis.
+    Run comprehensive comparative analysis with automatic DQN training.
     """
-    print("\n" + "#"*70)
-    print("#" + " "*10 + "CACHE-AIDED NOMA COMPARATIVE ANALYSIS" + " "*10 + "#")
-    print("#"*70 + "\n")
+    print("\n" + "#"*80)
+    print("#" + " "*10 + "CACHE-AIDED NOMA COMPARATIVE ANALYSIS" + " "*12 + "#")
+    print("#" + " "*15 + "(with Auto-Training DQN)" + " "*20 + "#")
+    print("#"*80 + "\n")
     
-    # Initialize analyzer
+    # ========================================================================
+    # STEP 1: Check for trained DQN
+    # ========================================================================
+    
+    trained_dqn_cache = None
+    
+    if HAS_DQN:
+        checkpoint_path = check_dqn_checkpoint()
+        
+        if checkpoint_path:
+            print(f"✅ Found trained DQN checkpoint: {checkpoint_path}")
+            trained_dqn_cache = load_trained_dqn(checkpoint_path, cfg)
+        else:
+            print("⚠️  No trained DQN checkpoint found.")
+            
+            # Auto-train DQN
+            checkpoint_path = train_dqn_automatically(
+                cfg,
+                num_episodes=cfg.RL_TRAINING_EPISODES
+            )
+            
+            if checkpoint_path:
+                trained_dqn_cache = load_trained_dqn(checkpoint_path, cfg)
+            else:
+                print("\n⚠️  Proceeding without DQN policy.\n")
+    
+    # ========================================================================
+    # STEP 2: Run comprehensive comparison
+    # ========================================================================
+    
     analyzer = CacheAidedNOMAAnalysis(
         cfg,
         snr_range_db=np.arange(-10, 31, 2),
-        num_realizations=1000
+        num_realizations=1000,
+        trained_dqn_cache=trained_dqn_cache
     )
     
-    # Run comparison (✅ FIXED: No DQN)
+    # Build policy list
     policies = ['topk', 'lru', 'lfu', 'random', 'none']
+    if trained_dqn_cache is not None:
+        policies.append('dqn')
     
     df = analyzer.run_full_comparison(policies=policies)
     
-    # Save results
+    # ========================================================================
+    # STEP 3: Save results and plots
+    # ========================================================================
+    
     os.makedirs('results', exist_ok=True)
     analyzer.save_results(df, save_dir='results')
     
-    # Plot main comparison
     analyzer.plot_main_comparison(
         df,
         save_path='results/cache_aided_vs_traditional_noma.png'
     )
     
-    print("\n" + "#"*70)
-    print("#" + " "*20 + "ANALYSIS COMPLETE" + " "*20 + "#")
-    print("#"*70 + "\n")
-    print("⚠️  For DQN comparison, run: python -m src.simulation.stable_dqn_sim\n")
+    print("\n" + "#"*80)
+    print("#" + " "*25 + "ANALYSIS COMPLETE" + " "*24 + "#")
+    print("#"*80 + "\n")
+    
+    # Performance summary
+    if trained_dqn_cache is not None:
+        print("✅ DQN included in comparison (trained model)")
+    else:
+        print("⚠️  DQN not included (training skipped or failed)")
+    
+    print("\nGenerated files:")
+    print("  • results/cache_aided_vs_traditional_noma.png")
+    print("  • results/comparative_analysis_results.csv")
+    print("  • results/performance_summary.txt")
+    
+    if trained_dqn_cache is not None:
+        print("  • models/dqn_cache/dqn_cache_final.pth (DQN checkpoint)")
+    
+    print("\n")
 
 
 if __name__ == "__main__":
