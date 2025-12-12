@@ -312,14 +312,14 @@ class DQNCache(CacheBase):
         
         # DQN hyperparameters
         learning_rate: float = 0.0001,
-        gamma: float = 0.95,
+        gamma: float = 0.99,
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.01,
-        epsilon_decay_steps: int = 25000,
+        epsilon_decay_steps: int = 200000,
         
         # Network architecture
         use_neural_network: bool = True,
-        hidden_dims: List[int] = [128, 64],
+        hidden_dims: List[int] = [128, 128],
         
         # Training parameters
         batch_size: int = 64,
@@ -1082,21 +1082,34 @@ class DQNCache(CacheBase):
     def set_eval_mode(self, eval_mode: bool = True):
         """
         Set evaluation mode (no exploration, no training).
-        
+    
+        🔧 FIXED (Dec 12, 2025): Prevents epsilon corruption during train/test switches
+    
+        ROOT CAUSE: Old implementation saved/restored epsilon on every call,
+        causing epsilon decay to restart from corrupted values.
+    
+        SOLUTION: Only save epsilon once when entering eval mode, restore when exiting.
+    
         Args:
             eval_mode: True for evaluation, False for training
         """
         self.eval_mode = eval_mode
-        
+    
         if eval_mode:
-            self._eval_epsilon = self.epsilon
-            self.epsilon = 0.0  # No exploration
+            # Save training epsilon ONLY if not already saved
+            if not hasattr(self, '_training_epsilon'):
+                self._training_epsilon = self.epsilon
+            self.epsilon = 0.0  # No exploration during evaluation
             if self.use_nn:
                 self.q_network.eval()
         else:
-            self.epsilon = self._eval_epsilon
+            # Restore training epsilon and clean up
+            if hasattr(self, '_training_epsilon'):
+                self.epsilon = self._training_epsilon
+                delattr(self, '_training_epsilon')
             if self.use_nn:
                 self.q_network.train()
+
     
     # ========================================================================
     # MODEL PERSISTENCE
