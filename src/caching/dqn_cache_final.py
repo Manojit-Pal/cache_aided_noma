@@ -35,6 +35,11 @@ from typing import Dict, List, Tuple, Optional, Set, Iterable
 import pickle
 
 try:
+    from .. import config as cfg_module
+except ImportError:
+    cfg_module = None
+
+try:
     import torch
     import torch.nn as nn
     import torch.optim as optim
@@ -652,9 +657,10 @@ class DQNCache(CacheBase):
         
         # NOMA succeeded
         if cic_enabled:
-            # ✅ BUG FIX #7: Use config parameter for CIC reward
-            from .. import config
-            reward = config.RL_REWARD_CIC_ENABLED  # CIC helped! (default 7.0)
+            if cfg_module:
+                reward = cfg_module.RL_REWARD_CIC_ENABLED
+            else:
+                reward = 7.0  # Default fallback
         else:
             reward = -1.0  # Standard NOMA delivery (no CIC)
 
