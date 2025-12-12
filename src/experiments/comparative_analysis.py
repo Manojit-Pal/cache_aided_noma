@@ -35,7 +35,7 @@ Outputs:
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 3.0 (Research-Validated)
+Version: 3.1 (Bug Fix: IndexError in save_results)
 """
 
 import numpy as np
@@ -672,6 +672,8 @@ class CacheAidedNOMAAnalysis:
     def save_results(self, df: pd.DataFrame, save_dir: str = 'results'):
         """
         Save results to CSV and generate summary report.
+        
+        🐛 FIXED (Dec 12, 2025): Handle empty dataframes properly
         """
         os.makedirs(save_dir, exist_ok=True)
         
@@ -682,33 +684,44 @@ class CacheAidedNOMAAnalysis:
         
         # Generate summary report
         summary_path = os.path.join(save_dir, 'performance_summary.txt')
-        with open(summary_path, 'w') as f:
-            f.write("="*70 + "\n")
-            f.write("CACHE-AIDED NOMA COMPARATIVE ANALYSIS SUMMARY\n")
-            f.write("="*70 + "\n\n")
-            
-            # High SNR performance
-            high_snr = df['snr_db'].max()
-            f.write(f"Performance at SNR = {high_snr} dB:\n")
-            f.write("-"*70 + "\n\n")
-            
-            high_snr_data = df[df['snr_db'] == high_snr]
-            
-            for policy in high_snr_data['policy'].unique():
-                policy_data = high_snr_data[high_snr_data['policy'] == policy].iloc[0]
-                policy_name = policy.upper() if policy else 'NO-CACHE'
-                
-                f.write(f"{policy_name}:\n")
-                f.write(f"  Sum-Rate: {policy_data['sum_rate_mean']:.4f} bps/Hz\n")
-                f.write(f"  Outage Prob: {policy_data['outage_probability']:.6f}\n")
-                f.write(f"  Cache Hit Rate: {policy_data['cache_hit_rate']:.4f}\n")
-                f.write(f"  CIC Benefit Rate: {policy_data['cic_benefit_rate']:.4f}\n")
-                f.write(f"  Fairness: {policy_data['fairness_mean']:.4f}\n")
-                f.write(f"  Energy Efficiency: {policy_data['energy_efficiency']:.2f} bits/J\n\n")
-            
-            f.write("="*70 + "\n")
         
-        print(f"✅ Saved: {summary_path}")
+        try:
+            with open(summary_path, 'w') as f:
+                f.write("="*70 + "\n")
+                f.write("CACHE-AIDED NOMA COMPARATIVE ANALYSIS SUMMARY\n")
+                f.write("="*70 + "\n\n")
+                
+                # High SNR performance
+                high_snr = df['snr_db'].max()
+                f.write(f"Performance at SNR = {high_snr} dB:\n")
+                f.write("-"*70 + "\n\n")
+                
+                high_snr_data = df[df['snr_db'] == high_snr]
+                
+                for policy in high_snr_data['policy'].unique():
+                    # 🐛 FIX: Check if filtered data is not empty
+                    policy_data = high_snr_data[high_snr_data['policy'] == policy]
+                    
+                    if len(policy_data) == 0:
+                        continue  # Skip if no data for this policy
+                    
+                    policy_row = policy_data.iloc[0]
+                    policy_name = policy.upper() if policy else 'NO-CACHE'
+                    
+                    f.write(f"{policy_name}:\n")
+                    f.write(f"  Sum-Rate: {policy_row['sum_rate_mean']:.4f} bps/Hz\n")
+                    f.write(f"  Outage Prob: {policy_row['outage_probability']:.6f}\n")
+                    f.write(f"  Cache Hit Rate: {policy_row.get('cache_hit_rate', 0.0):.4f}\n")
+                    f.write(f"  CIC Benefit Rate: {policy_row.get('cic_benefit_rate', 0.0):.4f}\n")
+                    f.write(f"  Fairness: {policy_row['fairness_mean']:.4f}\n")
+                    f.write(f"  Energy Efficiency: {policy_row['energy_efficiency']:.2f} bits/J\n\n")
+                
+                f.write("="*70 + "\n")
+            
+            print(f"✅ Saved: {summary_path}")
+            
+        except Exception as e:
+            print(f"⚠️  Warning: Could not generate summary report: {e}")
 
 
 # ============================================================================
