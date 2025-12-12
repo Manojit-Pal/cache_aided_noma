@@ -1154,7 +1154,7 @@ class DQNCache(CacheBase):
     def load_model(self, filepath: str):
         """Load learned model from file."""
         if self.use_nn:
-            checkpoint = torch.load(filepath, map_location=self.device)
+            checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
             self.q_network.load_state_dict(checkpoint['q_network'])
             self.target_network.load_state_dict(checkpoint['target_network'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
