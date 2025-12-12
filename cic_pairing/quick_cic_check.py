@@ -38,7 +38,7 @@ def quick_cic_check():
     num_users = 10
     print(f"➤ Creating {num_users} users...")
     positions = generate_user_positions(num_users, cfg.CELL_RADIUS, seed=42)
-    gains = compute_channel_gains(positions, cfg.PATH_LOSS_EXPONENT)
+    gains = compute_channel_gains(positions, cfg.PATHLOSS_EXPONENT)
     
     # Cache first 3 users (30%)
     cache_status = {i: (i < 3) for i in range(num_users)}

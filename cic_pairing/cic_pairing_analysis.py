@@ -227,7 +227,7 @@ def compare_with_without_cache(num_users=50, cache_ratio=0.3, seed=42):
     
     # Generate channel conditions
     positions = generate_user_positions(num_users, cfg.CELL_RADIUS, seed=seed)
-    gains = compute_channel_gains(positions, cfg.PATH_LOSS_EXPONENT)
+    gains = compute_channel_gains(positions, cfg.PATHLOSS_EXPONENT)
     
     # Define cache status (some users have cache)
     num_cached = int(num_users * cache_ratio)
@@ -332,7 +332,7 @@ def main():
     print(f"\n🔧 Setting up simulation with {num_users} users...")
     
     positions = generate_user_positions(num_users, cfg.CELL_RADIUS, seed=42)
-    gains = compute_channel_gains(positions, cfg.PATH_LOSS_EXPONENT)
+    gains = compute_channel_gains(positions, cfg.PATHLOSS_EXPONENT)
     
     # Cache status: 30% of users have cache (every 3rd user)
     cache_status = {i: (i % 3 == 0) for i in range(num_users)}
