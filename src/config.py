@@ -54,7 +54,7 @@ NUM_RUNS = 100  # ✅ UPDATED: Increased for DQN convergence (was 10)
 # ------------------------------
 # NOMA & channel params
 # ------------------------------
-TX_POWER = 1.0
+TX_POWER = 2.0
 NOISE_POWER = 1e-9
 CELL_RADIUS = 500.0
 PATHLOSS_EXPONENT = 3.5
@@ -73,7 +73,7 @@ USE_CLOSED_FORM_ALLOC = False  # ✅ DEPRECATED: Use POWER_ALLOC_METHOD instead
 
 # SIC parameters
 SIC_IMPERFECTION = 0.05  # Residual interference factor (ζ)
-TARGET_RATE_BPS = 0.5    # Target data rate in bps/Hz
+TARGET_RATE_BPS = 0.3    # Target data rate in bps/Hz
 
 # ✅ NEW: Channel modeling parameters (6G features)
 FADING_TYPE = "mixed"     # Options: 'rayleigh', 'rician', 'mixed'

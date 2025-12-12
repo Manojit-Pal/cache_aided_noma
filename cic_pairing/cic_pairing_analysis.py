@@ -207,7 +207,11 @@ def print_detailed_pair_info(results, show_top_n=5):
         print(f"  CIC Applied: {pr.get('cic_users', [])}")
         print(f"  Power Allocation:")
         print(f"    - p_w = {pr['p_w']:.3f}, p_s = {pr['p_s']:.3f}")
-        print(f"    - Method: {pr['power_allocation']['method']}")
+        
+        # ✅ FIX: Use .get() with default value to avoid KeyError
+        power_method = pr.get('power_allocation', {}).get('method', 'unknown')
+        print(f"    - Method: {power_method}")
+        
         print(f"  Performance:")
         print(f"    - Weak SINR:  {pr['sinr_w']:.3f} (Success: {pr['weak_success']})")
         print(f"    - Strong SINR: {pr['sinr_s_after']:.3f} (Success: {pr['strong_success']})")

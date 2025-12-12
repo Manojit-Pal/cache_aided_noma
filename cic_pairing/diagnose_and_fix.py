@@ -41,7 +41,7 @@ def diagnose_system():
     print("\n📡 Generating test scenario...")
     num_users = 20
     positions = generate_user_positions(num_users, cfg.CELL_RADIUS, seed=42)
-    gains = compute_channel_gains(positions, cfg.PATH_LOSS_EXPONENT)
+    gains = compute_channel_gains(positions, cfg.PATHLOSS_EXPONENT)
     
     # Analyze channel conditions
     print("\n" + "─" * 80)
@@ -192,7 +192,7 @@ def run_with_recommended_settings():
     # Run test
     num_users = 20
     positions = generate_user_positions(num_users, cfg.CELL_RADIUS, seed=42)
-    gains = compute_channel_gains(positions, cfg.PATH_LOSS_EXPONENT)
+    gains = compute_channel_gains(positions, cfg.PATHLOSS_EXPONENT)
     cache_status = {i: (i % 3 == 0) for i in range(num_users)}
     
     print(f"\n🚀 Running simulation with {num_users} users...")
