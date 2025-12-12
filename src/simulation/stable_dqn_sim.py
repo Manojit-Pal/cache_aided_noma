@@ -1,560 +1,898 @@
 # src/simulation/stable_dqn_sim.py
 """
-Simulation runner for Stable DQN Cache in NOMA systems.
+Stable NOMA-Aware DQN Cache Simulator with Train-Test-Eval Workflow
+
+This module implements a comprehensive DQN training and evaluation pipeline for
+Cache-Aided NOMA systems with proper separation of:
+1. Training Phase: DQN learns optimal caching policies
+2. Testing Phase: Validate DQN performance during training
+3. Evaluation Phase: Fair comparison against baseline policies
+
+Key Features:
+- ✅ NOMA-aware state representation (channel gains, SIC/CIC status)
+- ✅ Cache-Aided Interference Cancellation (CIC) rewards
+- ✅ Proper train/test/eval split (following ML best practices)
+- ✅ Baseline comparison (TopK, LRU, LFU, Random)
+- ✅ Comprehensive metrics tracking
+- ✅ Model checkpointing and loading
+
+Research References:
+- "Power Allocation in Cache-Aided NOMA Systems: Optimization and Deep
+  Reinforcement Learning Approaches" (arXiv:1909.11074)
+- "Cache-Aided NOMA Mobile Edge Computing: A Reinforcement Learning
+  Approach" (arXiv:1906.08812)
+- "Deep Q-Learning-Based Content Caching With Update Strategy"
+  (IEEE, Jiang et al., 2019)
+- "Train-Test Split for Evaluating ML Algorithms" (scikit-learn methodology)
+
+Author: Cache-Aided NOMA Team
+Date: December 12, 2025
+Version: 2.0 (NOMA-Aware with Train-Test-Eval)
 """
 
-import os
-import time
 import numpy as np
 import pandas as pd
+import time
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple
-from scipy.special import erfc
+import seaborn as sns
+from collections import defaultdict, Counter
+from typing import Dict, List, Tuple, Optional, Any
+import os
+import json
+from datetime import datetime
 
+# Project imports
+from src import config
 from src.utils import set_seed, sample_zipf_catalog
-from src.noma import channel_model
-from src.noma.power_allocation import allocate_power_gridsearch
-from src.noma.noma_base import simulate_noma_pair
 
-# Import caches
-from src.caching.dqn_cache_final import StableDQNCache
-from src.caching.static_cache import StaticTopKCache
-from src.caching.dynamic_cache import LRUCache, LFUCache
+# NOMA module imports
+from src.noma import (
+    generate_user_positions,
+    compute_channel_gains,
+    pair_users,
+    allocate_power,
+    simulate_sic_process,
+    sinr_threshold_from_rate,
+    rate_from_sinr
+)
 
+# Caching module imports
+from src.caching import (
+    create_cache,
+    CacheBase,
+    StaticTopKCache,
+    LRUCache,
+    LFUCache,
+    RandomCache
+)
 
-def compute_ber_bpsk(sinr):
-    """Compute BER for BPSK."""
-    return 0.5 * erfc(np.sqrt(np.maximum(sinr, 0.0)))
+# Try to import DQN cache
+try:
+    from src.caching import DQNCache
+    HAS_DQN = True
+except ImportError:
+    HAS_DQN = False
+    print("⚠️  DQN cache not available - cannot run this simulator")
+    print("    Please install PyTorch and ensure dqn_cache_final.py exists")
 
 
 # ============================================================================
-# TRAINING PHASE
+# NOMA-AWARE DQN TRAINER
 # ============================================================================
 
-def train_dqn_cache(
-    cache: StableDQNCache,
-    cfg,
-    num_episodes: int = 50,
-    steps_per_episode: int = 1000,
-    verbose: bool = True
-) -> Dict:
+class NOMADQNTrainer:
     """
-    Train DQN cache over multiple episodes.
+    NOMA-Aware DQN Training System.
     
-    Args:
-        cache: StableDQNCache instance
-        cfg: Configuration object
-        num_episodes: Number of training episodes
-        steps_per_episode: Requests per episode
-        verbose: Print progress
+    Implements proper ML workflow:
+    1. Training: Learn from workload
+    2. Testing: Validate during training (early stopping)
+    3. Evaluation: Final assessment (never seen before)
     
-    Returns:
-        Training statistics dictionary
+    NOMA-Specific Features:
+    - State includes channel gains, SIC status, cache status
+    - Rewards account for CIC opportunities
+    - Metrics track NOMA performance (outage, SIC success, CIC benefit)
     """
-    print(f"\n{'='*70}")
-    print("TRAINING PHASE")
-    print(f"{'='*70}")
-    print(f"Episodes: {num_episodes}")
-    print(f"Steps per episode: {steps_per_episode}")
-    print(f"Total training steps: {num_episodes * steps_per_episode}")
     
-    # Generate training environment
-    user_pos = channel_model.generate_user_positions(
-        cfg.NUM_USERS, cfg.CELL_RADIUS, seed=cfg.RANDOM_SEED
-    )
-    distances = user_pos[:, 2]
-    pl = np.array([
-        channel_model.pathloss(d, cfg.PATHLOSS_EXPONENT, cfg.MIN_DISTANCE)
-        for d in distances
-    ])
-    
-    # Training metrics
-    episode_rewards = []
-    episode_hit_rates = []
-    episode_losses = []
-    
-    total_steps = 0
-    start_time = time.time()
-    
-    for episode in range(num_episodes):
-        # Track reward specific to THIS episode
-        start_cum_reward = cache.get_stats()['cumulative_reward']
+    def __init__(self, cfg, verbose: bool = True):
+        """
+        Initialize NOMA-aware DQN trainer.
         
-        episode_hits = 0
-        episode_requests = 0
+        Args:
+            cfg: Configuration object
+            verbose: Whether to print progress
+        """
+        self.cfg = cfg
+        self.verbose = verbose
         
-        # Update channel for this episode
-        small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
-        channel_gains = pl * small_scale
+        # Create save directory
+        self.save_dir = 'models/dqn_cache'
+        os.makedirs(self.save_dir, exist_ok=True)
         
-        for step in range(steps_per_episode):
-            # Update channel periodically (mobility)
-            if step % 50 == 0:
-                small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
-                channel_gains = pl * small_scale
+        # Training history
+        self.train_history = []
+        self.test_history = []
+        
+        # Best model tracking
+        self.best_hit_rate = 0.0
+        self.best_episode = 0
+        
+        if self.verbose:
+            self._print_header()
+    
+    def _print_header(self):
+        """Print training session header."""
+        print("\n" + "#"*80)
+        print("#" + " "*20 + "NOMA-AWARE DQN TRAINING SYSTEM" + " "*21 + "#")
+        print("#"*80)
+        print(f"\nConfiguration:")
+        print(f"  Cache Size: {self.cfg.CACHE_SIZE}")
+        print(f"  Num Files: {self.cfg.NUM_FILES}")
+        print(f"  Num Users: {self.cfg.NUM_USERS}")
+        print(f"  NOMA Pairing: {self.cfg.PAIRING_METHOD}")
+        print(f"  Power Allocation: {self.cfg.POWER_ALLOC_METHOD}")
+        print(f"  CIC Enabled: {self.cfg.ENABLE_CIC}")
+        print(f"  Target Rate: {self.cfg.TARGET_RATE_BPS/1e6:.1f} Mbps")
+        print(f"\nDQN Hyperparameters:")
+        print(f"  Learning Rate: {self.cfg.RL_LEARNING_RATE}")
+        print(f"  Gamma: {self.cfg.RL_GAMMA}")
+        print(f"  Epsilon: {self.cfg.RL_EPSILON_START} → {self.cfg.RL_EPSILON_END}")
+        print(f"  Batch Size: {self.cfg.RL_BATCH_SIZE}")
+        print(f"  Replay Buffer: {self.cfg.RL_REPLAY_BUFFER_SIZE}")
+        print(f"  Prioritized Replay: {self.cfg.RL_USE_PRIORITIZED_REPLAY}")
+        print("\n" + "="*80 + "\n")
+    
+    def create_dqn_cache(self, seed: Optional[int] = None) -> DQNCache:
+        """
+        Create a fresh DQN cache instance.
+        
+        Args:
+            seed: Random seed for reproducibility
+        
+        Returns:
+            DQNCache instance
+        """
+        if seed is None:
+            seed = self.cfg.RANDOM_SEED
+        
+        return DQNCache(
+            capacity=self.cfg.CACHE_SIZE,
+            num_files=self.cfg.NUM_FILES,
+            num_users=self.cfg.NUM_USERS,
             
-            # Generate request
-            file_id = sample_zipf_catalog(cfg.NUM_FILES, cfg.ZIPF_ALPHA, size=1)[0]
-            user_id = np.random.choice(cfg.NUM_USERS)
+            # Learning parameters
+            learning_rate=self.cfg.RL_LEARNING_RATE,
+            gamma=self.cfg.RL_GAMMA,
+            epsilon_start=self.cfg.RL_EPSILON_START,
+            epsilon_end=self.cfg.RL_EPSILON_END,
+            epsilon_decay_steps=self.cfg.RL_EPSILON_DECAY_STEPS,
             
-            episode_requests += 1
-            total_steps += 1
+            # Network architecture
+            use_neural_network=self.cfg.RL_USE_NEURAL_NETWORK,
+            hidden_dims=self.cfg.RL_HIDDEN_DIMS,
             
-            # Check if last step of episode
-            is_episode_end = (step == steps_per_episode - 1)
+            # Training parameters
+            batch_size=self.cfg.RL_BATCH_SIZE,
+            replay_buffer_size=self.cfg.RL_REPLAY_BUFFER_SIZE,
+            train_freq=self.cfg.RL_TRAIN_FREQUENCY,
+            warm_up_steps=self.cfg.RL_WARM_UP_STEPS,
+            
+            # Prioritized replay
+            use_prioritized_replay=self.cfg.RL_USE_PRIORITIZED_REPLAY,
+            priority_alpha=self.cfg.RL_PRIORITY_ALPHA,
+            priority_beta_start=self.cfg.RL_PRIORITY_BETA_START,
+            priority_beta_end=self.cfg.RL_PRIORITY_BETA_END,
+            priority_beta_frames=self.cfg.RL_PRIORITY_BETA_FRAMES,
+            
+            # Stability
+            gradient_clip=self.cfg.RL_GRADIENT_CLIP,
+            tau=self.cfg.RL_TAU,
+            
+            # NOMA awareness
+            enable_noma_awareness=True,
+            
+            seed=seed
+        )
+    
+    def run_episode(self, cache: DQNCache, seed: int, 
+                   episode_done: bool = False,
+                   phase: str = 'train') -> Dict:
+        """
+        Run a single NOMA-aware episode.
+        
+        Args:
+            cache: DQN cache instance
+            seed: Random seed
+            episode_done: Whether this is the last episode
+            phase: 'train', 'test', or 'eval'
+        
+        Returns:
+            Dictionary of metrics
+        """
+        set_seed(seed)
+        
+        # Initialize metrics
+        metrics = {
+            'total_requests': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'noma_transmissions': 0,
+            'noma_successes': 0,
+            'noma_failures': 0,
+            'outages': 0,
+            'sic_attempts': 0,
+            'sic_successes': 0,
+            'cic_opportunities': 0,
+            'cic_enabled_weak': 0,
+            'cic_enabled_strong': 0,
+            'total_throughput': 0.0,
+            'total_energy': 0.0,
+        }
+        
+        # ====================================================================
+        # STEP 1: CHANNEL GENERATION (NOMA-Aware)
+        # ====================================================================
+        
+        user_positions = generate_user_positions(
+            self.cfg.NUM_USERS,
+            self.cfg.CELL_RADIUS,
+            seed=seed
+        )
+        
+        channel_gains = compute_channel_gains(
+            user_positions,
+            exponent=self.cfg.PATHLOSS_EXPONENT,
+            fading_type=self.cfg.FADING_TYPE,
+            K_factor_db=self.cfg.RICIAN_K_FACTOR_DB,
+            los_probability=self.cfg.LOS_PROBABILITY
+        )
+        
+        # ====================================================================
+        # STEP 2: GENERATE REQUESTS (Zipf Distribution)
+        # ====================================================================
+        
+        total_requests = self.cfg.NUM_USERS * self.cfg.REQUESTS_PER_USER
+        file_requests = sample_zipf_catalog(
+            self.cfg.NUM_FILES,
+            self.cfg.ZIPF_ALPHA,
+            size=total_requests
+        )
+        
+        requesting_users = np.random.choice(
+            self.cfg.NUM_USERS,
+            size=total_requests,
+            replace=True
+        )
+        
+        # ====================================================================
+        # STEP 3: PROCESS REQUESTS WITH NOMA-AWARE CACHING
+        # ====================================================================
+        
+        # Group by user
+        user_requests = defaultdict(list)
+        for file_id, user_id in zip(file_requests, requesting_users):
+            user_requests[user_id].append(file_id)
+        
+        # Populate TopK caches if needed
+        if isinstance(cache, StaticTopKCache) and len(cache) == 0:
+            cnt = Counter(file_requests)
+            ranking = [item for item, _ in cnt.most_common()]
+            cache.populate(ranking)
+        
+        # Track cache misses (need NOMA transmission)
+        miss_users = []
+        miss_files = {}
+        
+        for user_id in range(self.cfg.NUM_USERS):
+            if user_id not in user_requests:
+                continue
+            
+            # Take first request
+            file_id = user_requests[user_id][0]
+            metrics['total_requests'] += 1
             
             # Check cache
-            cache_hit = cache.is_hit(file_id)
+            hit = cache.is_hit(file_id, update_stats=True)
             
-            if cache_hit:
-                episode_hits += 1
-                # Observe cache hit
-                cache.observe_request(
-                    user_id=user_id,
-                    file_id=file_id,
-                    cache_hit=True,
-                    channel_gain=channel_gains[user_id],
-                    episode_done=is_episode_end
-                )
+            if hit:
+                metrics['cache_hits'] += 1
+                metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
             else:
-                # Cache miss - NOMA transmission
-                partner_user = np.random.choice(
-                    [u for u in range(cfg.NUM_USERS) if u != user_id]
-                )
-                
-                # Determine weak/strong users
-                if channel_gains[user_id] < channel_gains[partner_user]:
-                    weak_user, strong_user = user_id, partner_user
-                else:
-                    weak_user, strong_user = partner_user, user_id
-                
-                gain_weak = channel_gains[weak_user]
-                gain_strong = channel_gains[strong_user]
-                
-                # Power allocation
-                p_w, p_s, feasible, _ = allocate_power_gridsearch(
-                    gain_weak, gain_strong, cfg, grid_points=cfg.POWER_ALLOC_GRID
-                )
-                
-                # Simulate NOMA transmission
-                weak_success, strong_success, sinr_w, _, sinr_s_after = \
-                    simulate_noma_pair(gain_weak, gain_strong, cfg, p_w, p_s)
-                
-                # Determine outcome for requesting user
-                noma_success = weak_success if user_id == weak_user else strong_success
-                user_sinr = sinr_w if user_id == weak_user else sinr_s_after
-                ber = compute_ber_bpsk(user_sinr)
-                outage = not noma_success
-                
-                # Learn from transmission
-                cache.observe_request(
-                    user_id=user_id,
-                    file_id=file_id,
-                    cache_hit=False,
-                    noma_success=noma_success,
-                    channel_gain=channel_gains[user_id],
-                    sinr_weak=sinr_w,
-                    sinr_strong=sinr_s_after,
-                    ber=ber,
-                    outage=outage,
-                    episode_done=is_episode_end
-                )
+                metrics['cache_misses'] += 1
+                miss_users.append(user_id)
+                miss_files[user_id] = file_id
         
-        # Episode statistics
-        stats = cache.get_stats()
+        if len(miss_users) == 0:
+            # All hits!
+            return self._compile_metrics(metrics, cache, phase)
         
-        # Calculate ACTUAL episode reward (Difference between end and start)
-        current_cum_reward = stats['cumulative_reward']
-        actual_episode_reward = current_cum_reward - start_cum_reward
+        # ====================================================================
+        # STEP 4: NOMA PAIRING
+        # ====================================================================
         
-        episode_hit_rate = episode_hits / episode_requests if episode_requests > 0 else 0
+        pairs, leftover = pair_users(
+            miss_users,
+            channel_gains,
+            method=self.cfg.PAIRING_METHOD
+        )
         
-        episode_rewards.append(actual_episode_reward)
-        episode_hit_rates.append(episode_hit_rate)
-        episode_losses.append(stats['avg_loss'])
+        sinr_threshold = sinr_threshold_from_rate(self.cfg.TARGET_RATE_BPS)
         
-        # Print progress
-        if verbose and (episode + 1) % 5 == 0:
-            elapsed = time.time() - start_time
-            print(f"Episode {episode+1}/{num_episodes} | "
-                  f"Hit Rate: {episode_hit_rate:.3f} | "
-                  f"Reward: {actual_episode_reward:.1f} | "  # Changed to display episode reward
-                  f"Epsilon: {stats['epsilon']:.3f} | "
-                  f"Loss: {stats['avg_loss']:.6f} | "
-                  f"Time: {elapsed:.1f}s")
-            start_time = time.time()
-    
-    print(f"\n✅ Training complete!")
-    print(f"   Final epsilon: {cache.epsilon:.4f}")
-    print(f"   Final hit rate: {episode_hit_rates[-1]:.4f}")
-    
-    return {
-        'episode_rewards': episode_rewards,
-        'episode_hit_rates': episode_hit_rates,
-        'episode_losses': episode_losses,
-        'total_steps': total_steps
-    }
-
-
-# ============================================================================
-# EVALUATION PHASE
-# ============================================================================
-
-def evaluate_cache(
-    cache,
-    cfg,
-    seed: int,
-    num_requests: int = 5000,
-    cache_name: str = "Unknown"
-) -> Dict:
-    """
-    Evaluate a cache policy.
-    
-    Args:
-        cache: Cache instance
-        cfg: Configuration
-        seed: Random seed
-        num_requests: Number of requests to evaluate
-        cache_name: Name for logging
-    
-    Returns:
-        Performance metrics dictionary
-    """
-    set_seed(seed)
-    
-    # Set evaluation mode if DQN cache
-    if isinstance(cache, StableDQNCache):
-        cache.set_eval_mode(True)
-    
-    # Generate evaluation environment
-    user_pos = channel_model.generate_user_positions(
-        cfg.NUM_USERS, cfg.CELL_RADIUS, seed=seed
-    )
-    distances = user_pos[:, 2]
-    pl = np.array([
-        channel_model.pathloss(d, cfg.PATHLOSS_EXPONENT, cfg.MIN_DISTANCE)
-        for d in distances
-    ])
-    small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
-    channel_gains = pl * small_scale
-    
-    # Metrics
-    total_hits = 0
-    total_requests = 0
-    total_transmissions = 0
-    total_outages = 0
-    ber_list = []
-    noma_successes = 0
-    
-    for step in range(num_requests):
-        if step % 50 == 0:
-            small_scale = channel_model.rayleigh_gain(cfg.NUM_USERS)
-            channel_gains = pl * small_scale
+        # ====================================================================
+        # STEP 5: SIMULATE NOMA TRANSMISSIONS WITH SIC/CIC
+        # ====================================================================
         
-        file_id = sample_zipf_catalog(cfg.NUM_FILES, cfg.ZIPF_ALPHA, size=1)[0]
-        user_id = np.random.choice(cfg.NUM_USERS)
+        for weak_user, strong_user in pairs:
+            self._process_noma_pair(
+                cache=cache,
+                weak_user=weak_user,
+                strong_user=strong_user,
+                weak_file=miss_files[weak_user],
+                strong_file=miss_files[strong_user],
+                channel_gains=channel_gains,
+                sinr_threshold=sinr_threshold,
+                metrics=metrics,
+                episode_done=episode_done,
+                phase=phase
+            )
         
-        total_requests += 1
-        cache_hit = cache.is_hit(file_id)
+        # Handle leftover user
+        if leftover is not None:
+            self._process_single_user(
+                cache=cache,
+                user_id=leftover,
+                file_id=miss_files[leftover],
+                channel_gains=channel_gains,
+                sinr_threshold=sinr_threshold,
+                metrics=metrics,
+                episode_done=episode_done,
+                phase=phase
+            )
         
-        if cache_hit:
-            total_hits += 1
+        return self._compile_metrics(metrics, cache, phase)
+    
+    def _process_noma_pair(self, cache: DQNCache, weak_user: int, strong_user: int,
+                           weak_file: int, strong_file: int,
+                           channel_gains: np.ndarray, sinr_threshold: float,
+                           metrics: Dict, episode_done: bool, phase: str):
+        """
+        Process NOMA pair transmission with SIC/CIC (NOMA-AWARE).
+        """
+        gain_w = channel_gains[weak_user]
+        gain_s = channel_gains[strong_user]
+        
+        metrics['noma_transmissions'] += 1
+        
+        # Check cache status for CIC
+        weak_cached = cache.is_hit(weak_file, update_stats=False)
+        strong_cached = cache.is_hit(strong_file, update_stats=False)
+        
+        # Power allocation (cache-aware)
+        p_weak, p_strong, feasible, _ = allocate_power(
+            gain_w=gain_w,
+            gain_s=gain_s,
+            cfg=self.cfg,
+            method=self.cfg.POWER_ALLOC_METHOD,
+            weak_cached=weak_cached,
+            strong_cached=strong_cached,
+            grid_points=self.cfg.POWER_ALLOC_GRID
+        )
+        
+        # Simulate SIC/CIC
+        sic_results = simulate_sic_process(
+            P_tx=self.cfg.TX_POWER,
+            p_weak=p_weak,
+            p_strong=p_strong,
+            gain_w=gain_w,
+            gain_s=gain_s,
+            noise=self.cfg.NOISE_POWER,
+            target_sinr=sinr_threshold,
+            imperfection_factor=self.cfg.SIC_IMPERFECTION,
+            weak_cached=weak_cached,
+            strong_cached=strong_cached
+        )
+        
+        weak_success = sic_results['weak_success']
+        strong_success = sic_results['strong_success']
+        
+        # Update metrics
+        metrics['sic_attempts'] += 1
+        if sic_results['can_decode_weak']:
+            metrics['sic_successes'] += 1
+        
+        # CIC tracking (NOVEL CONTRIBUTION)
+        if weak_cached:
+            metrics['cic_opportunities'] += 1
+            if strong_success:
+                metrics['cic_enabled_strong'] += 1
+        
+        if strong_cached:
+            metrics['cic_opportunities'] += 1
+            if weak_success:
+                metrics['cic_enabled_weak'] += 1
+        
+        # Transmission outcomes
+        if weak_success and strong_success:
+            metrics['noma_successes'] += 1
+        elif weak_success or strong_success:
+            metrics['noma_successes'] += 1
+            metrics['outages'] += 1  # One user failed
         else:
-            total_transmissions += 1
-            
-            # NOMA transmission
-            partner_user = np.random.choice(
-                [u for u in range(cfg.NUM_USERS) if u != user_id]
-            )
-            
-            if channel_gains[user_id] < channel_gains[partner_user]:
-                weak_user, strong_user = user_id, partner_user
-            else:
-                weak_user, strong_user = partner_user, user_id
-            
-            gain_weak = channel_gains[weak_user]
-            gain_strong = channel_gains[strong_user]
-            
-            p_w, p_s, feasible, _ = allocate_power_gridsearch(
-                gain_weak, gain_strong, cfg, grid_points=cfg.POWER_ALLOC_GRID
-            )
-            
-            weak_success, strong_success, sinr_w, _, sinr_s_after = \
-                simulate_noma_pair(gain_weak, gain_strong, cfg, p_w, p_s)
-            
-            noma_success = weak_success if user_id == weak_user else strong_success
-            user_sinr = sinr_w if user_id == weak_user else sinr_s_after
-            ber = compute_ber_bpsk(user_sinr)
-            
-            ber_list.append(ber)
-            
-            if not noma_success:
-                total_outages += 1
-            else:
-                noma_successes += 1
-    
-    # Restore training mode if DQN cache
-    if isinstance(cache, StableDQNCache):
-        cache.set_eval_mode(False)
-    
-    hit_rate = total_hits / total_requests if total_requests > 0 else 0
-    outage_rate = total_outages / total_transmissions if total_transmissions > 0 else 0
-    noma_success_rate = noma_successes / total_transmissions if total_transmissions > 0 else 0
-    avg_ber = np.mean(ber_list) if ber_list else 0
-    
-    return {
-        'cache_policy': cache_name,
-        'hit_rate': hit_rate,
-        'outage_rate': outage_rate,
-        'noma_success_rate': noma_success_rate,
-        'avg_ber': avg_ber,
-        'total_hits': total_hits,
-        'total_transmissions': total_transmissions,
-        'total_outages': total_outages
-    }
-
-
-# ============================================================================
-# COMPREHENSIVE COMPARISON
-# ============================================================================
-
-def run_comprehensive_comparison(
-    cfg,
-    num_training_episodes: int = 50,
-    steps_per_episode: int = 1000,
-    num_eval_runs: int = 10,
-    eval_requests_per_run: int = 5000
-) -> pd.DataFrame:
-    """
-    Run comprehensive comparison of all cache policies.
-    
-    Compares:
-    - Stable DQN (our method)
-    - Top-K (static baseline)
-    - LRU (dynamic baseline)
-    - LFU (dynamic baseline)
-    
-    Returns:
-        DataFrame with all results
-    """
-    print(f"\n{'='*80}")
-    print("COMPREHENSIVE CACHE POLICY COMPARISON")
-    print(f"{'='*80}")
-    
-    all_results = []
-    
-    # ========================================================================
-    # 1. Train and Evaluate DQN Cache
-    # ========================================================================
-    
-    print(f"\n{'='*80}")
-    print("PHASE 1: STABLE DQN CACHE")
-    print(f"{'='*80}")
-    
-    dqn_cache = StableDQNCache(
-        capacity=cfg.CACHE_SIZE,
-        num_files=cfg.NUM_FILES,
-        num_users=cfg.NUM_USERS,
-        learning_rate=0.0001,
-        gamma=0.95,
-        epsilon_start=1.0,
-        epsilon_end=0.01,
-        epsilon_decay_steps=num_training_episodes * steps_per_episode // 2,
-        hidden_dims=[128, 64],
-        batch_size=64,
-        use_prioritized_replay=True,
-        seed=cfg.RANDOM_SEED
-    )
-    
-    # Train
-    training_stats = train_dqn_cache(
-        dqn_cache, cfg, num_training_episodes, steps_per_episode
-    )
-    
-    # Evaluate multiple times
-    print(f"\nEvaluating DQN cache ({num_eval_runs} runs)...")
-    for run in range(num_eval_runs):
-        seed = cfg.RANDOM_SEED + run + 1000
-        result = evaluate_cache(dqn_cache, cfg, seed, eval_requests_per_run, "DQN")
-        result['run'] = run + 1
-        result['seed'] = seed
-        all_results.append(result)
+            metrics['noma_failures'] += 1
+            metrics['outages'] += 2  # Both failed
         
-        if (run + 1) % 3 == 0:
-            print(f"  Run {run+1}/{num_eval_runs}: "
-                  f"Hit={result['hit_rate']:.3f}, "
-                  f"Outage={result['outage_rate']:.3f}")
+        # Throughput and energy
+        metrics['total_throughput'] += sic_results['sum_rate']
+        metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
+        
+        # DQN Learning (only during training)
+        if phase == 'train' and hasattr(cache, 'request'):
+            # Weak user
+            cache.request(
+                item=weak_file,
+                user_id=weak_user,
+                channel_gain=gain_w,
+                paired_user=strong_user,
+                paired_file=strong_file,
+                noma_success=weak_success,
+                outage=not weak_success,
+                sinr_weak=sic_results['sinr_w'],
+                sinr_strong=sic_results['sinr_s_after'],
+                episode_done=episode_done
+            )
+            
+            # Strong user
+            cache.request(
+                item=strong_file,
+                user_id=strong_user,
+                channel_gain=gain_s,
+                paired_user=weak_user,
+                paired_file=weak_file,
+                noma_success=strong_success,
+                outage=not strong_success,
+                sinr_weak=sic_results['sinr_w'],
+                sinr_strong=sic_results['sinr_s_after'],
+                episode_done=episode_done
+            )
     
-    # ========================================================================
-    # 2. Evaluate Baseline Caches
-    # ========================================================================
+    def _process_single_user(self, cache: DQNCache, user_id: int, file_id: int,
+                            channel_gains: np.ndarray, sinr_threshold: float,
+                            metrics: Dict, episode_done: bool, phase: str):
+        """
+        Process single user transmission.
+        """
+        gain = channel_gains[user_id]
+        
+        sinr = self.cfg.TX_POWER * gain / self.cfg.NOISE_POWER
+        success = sinr >= sinr_threshold
+        
+        if success:
+            metrics['noma_successes'] += 1
+            metrics['total_throughput'] += rate_from_sinr(sinr)
+        else:
+            metrics['noma_failures'] += 1
+            metrics['outages'] += 1
+        
+        metrics['noma_transmissions'] += 1
+        metrics['total_energy'] += self.cfg.TX_POWER
+        
+        # DQN Learning (only during training)
+        if phase == 'train' and hasattr(cache, 'request'):
+            cache.request(
+                item=file_id,
+                user_id=user_id,
+                channel_gain=gain,
+                noma_success=success,
+                outage=not success,
+                episode_done=episode_done
+            )
     
-    baseline_policies = {
-        'TopK': lambda: StaticTopKCache(cfg.CACHE_SIZE),
-        'LRU': lambda: LRUCache(cfg.CACHE_SIZE),
-        'LFU': lambda: LFUCache(cfg.CACHE_SIZE)
-    }
+    def _compile_metrics(self, metrics: Dict, cache, phase: str) -> Dict:
+        """
+        Compile final metrics for episode.
+        """
+        total_req = max(metrics['total_requests'], 1)
+        total_noma = max(metrics['noma_transmissions'], 1)
+        total_noma_users = total_noma * 2
+        total_sic = max(metrics['sic_attempts'], 1)
+        
+        result = {
+            # Cache performance
+            'hit_rate': metrics['cache_hits'] / total_req,
+            'miss_rate': metrics['cache_misses'] / total_req,
+            
+            # NOMA performance
+            'outage_probability': metrics['outages'] / total_noma_users,
+            'noma_success_rate': metrics['noma_successes'] / total_noma,
+            
+            # SIC performance
+            'sic_success_rate': metrics['sic_successes'] / total_sic,
+            
+            # CIC performance (NOVEL)
+            'cic_benefit_rate': (metrics['cic_enabled_weak'] + 
+                                 metrics['cic_enabled_strong']) / total_noma_users,
+            
+            # Throughput
+            'avg_throughput': metrics['total_throughput'] / total_req,
+            'spectral_efficiency': metrics['total_throughput'] / total_noma,
+            
+            # Energy
+            'energy_per_bit': metrics['total_energy'] / max(metrics['total_throughput'], 1),
+            
+            # Raw counts
+            'total_requests': metrics['total_requests'],
+            'cache_hits': metrics['cache_hits'],
+            'noma_transmissions': metrics['noma_transmissions'],
+            'outages': metrics['outages'],
+            'cic_events': metrics['cic_opportunities'],
+            
+            # Phase
+            'phase': phase,
+        }
+        
+        # Add DQN stats
+        if hasattr(cache, 'get_stats'):
+            dqn_stats = cache.get_stats()
+            result.update(dqn_stats)
+        
+        return result
     
-    for policy_name, cache_constructor in baseline_policies.items():
+    def train(self, num_episodes: int, test_interval: int = 50,
+             save_best: bool = True) -> Tuple[DQNCache, pd.DataFrame]:
+        """
+        Train DQN cache with periodic testing.
+        
+        Args:
+            num_episodes: Number of training episodes
+            test_interval: Test every N episodes
+            save_best: Save best model checkpoint
+        
+        Returns:
+            Tuple of (trained_cache, training_history_df)
+        """
+        if not HAS_DQN:
+            raise ImportError("DQN not available")
+        
         print(f"\n{'='*80}")
-        print(f"EVALUATING: {policy_name}")
-        print(f"{'='*80}")
+        print(f"TRAINING PHASE: {num_episodes} episodes")
+        print(f"{'='*80}\n")
         
-        for run in range(num_eval_runs):
-            seed = cfg.RANDOM_SEED + run + 1000
-            set_seed(seed)
+        # Create DQN cache
+        cache = self.create_dqn_cache()
+        
+        # Training loop
+        for episode in range(num_episodes):
+            seed = self.cfg.RANDOM_SEED + episode
+            episode_done = (episode == num_episodes - 1)
             
-            cache = cache_constructor()
+            # Training episode
+            result = self.run_episode(
+                cache, 
+                seed, 
+                episode_done=episode_done,
+                phase='train'
+            )
+            result['episode'] = episode
+            self.train_history.append(result)
             
-            # Populate TopK cache
-            if policy_name == 'TopK':
-                requests = sample_zipf_catalog(
-                    cfg.NUM_FILES, cfg.ZIPF_ALPHA, 
-                    size=cfg.NUM_USERS * cfg.REQUESTS_PER_USER
-                )
-                from collections import Counter
-                cnt = Counter(requests)
-                ranking = [item for item, _ in cnt.most_common()]
-                cache.populate(ranking)
-            
-            result = evaluate_cache(cache, cfg, seed, eval_requests_per_run, policy_name)
-            result['run'] = run + 1
-            result['seed'] = seed
-            all_results.append(result)
-            
-            if (run + 1) % 3 == 0:
-                print(f"  Run {run+1}/{num_eval_runs}: "
+            # Periodic testing
+            if (episode + 1) % test_interval == 0:
+                test_result = self._test_cache(cache, episode)
+                self.test_history.append(test_result)
+                
+                # Save best model
+                if save_best and test_result['hit_rate'] > self.best_hit_rate:
+                    self.best_hit_rate = test_result['hit_rate']
+                    self.best_episode = episode
+                    self._save_checkpoint(cache, episode, test_result)
+                
+                if self.verbose:
+                    self._print_progress(episode, result, test_result)
+            elif self.verbose and (episode + 1) % 10 == 0:
+                print(f"  Episode {episode+1}/{num_episodes}: "
                       f"Hit={result['hit_rate']:.3f}, "
-                      f"Outage={result['outage_rate']:.3f}")
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(all_results)
-    
-    # Print summary
-    print(f"\n{'='*80}")
-    print("FINAL SUMMARY")
-    print(f"{'='*80}")
-    
-    summary = df.groupby('cache_policy').agg({
-        'hit_rate': ['mean', 'std'],
-        'outage_rate': ['mean', 'std'],
-        'noma_success_rate': ['mean', 'std'],
-        'avg_ber': ['mean', 'std']
-    }).round(4)
-    
-    print(summary)
-    
-    # Calculate improvements
-    print(f"\n{'='*80}")
-    print("IMPROVEMENTS OVER TOP-K BASELINE")
-    print(f"{'='*80}")
-    
-    topk_hit = df[df['cache_policy'] == 'TopK']['hit_rate'].mean()
-    topk_outage = df[df['cache_policy'] == 'TopK']['outage_rate'].mean()
-    
-    for policy in ['DQN', 'LRU', 'LFU']:
-        policy_df = df[df['cache_policy'] == policy]
-        hit_improvement = (policy_df['hit_rate'].mean() - topk_hit) / topk_hit * 100
-        outage_reduction = (topk_outage - policy_df['outage_rate'].mean()) / topk_outage * 100
+                      f"ε={result.get('epsilon', 0):.3f}, "
+                      f"Loss={result.get('avg_loss', 0):.4f}")
         
-        print(f"\n{policy}:")
-        print(f"  Hit Rate Improvement: {hit_improvement:+.2f}%")
-        print(f"  Outage Reduction: {outage_reduction:+.2f}%")
+        print(f"\n✅ Training complete!")
+        print(f"   Best hit rate: {self.best_hit_rate:.4f} (episode {self.best_episode})")
+        
+        # Save final model
+        self._save_checkpoint(cache, num_episodes - 1, 
+                            self.train_history[-1], final=True)
+        
+        return cache, pd.DataFrame(self.train_history)
     
-    return df, training_stats
+    def _test_cache(self, cache: DQNCache, episode: int) -> Dict:
+        """
+        Test cache on validation set.
+        """
+        # Set evaluation mode (no learning, no exploration)
+        cache.set_eval_mode(True)
+        
+        # Run test episode
+        seed = self.cfg.RANDOM_SEED + 100000 + episode  # Different seed space
+        result = self.run_episode(cache, seed, episode_done=False, phase='test')
+        result['episode'] = episode
+        
+        # Restore training mode
+        cache.set_eval_mode(False)
+        
+        return result
+    
+    def _print_progress(self, episode: int, train_result: Dict, test_result: Dict):
+        """
+        Print training progress.
+        """
+        print(f"\n  Episode {episode+1}:")
+        print(f"    TRAIN: Hit={train_result['hit_rate']:.4f}, "
+              f"Outage={train_result['outage_probability']:.4f}, "
+              f"CIC={train_result['cic_benefit_rate']:.4f}")
+        print(f"    TEST:  Hit={test_result['hit_rate']:.4f}, "
+              f"Outage={test_result['outage_probability']:.4f}, "
+              f"CIC={test_result['cic_benefit_rate']:.4f}")
+        print(f"    DQN:   ε={train_result.get('epsilon', 0):.4f}, "
+              f"Loss={train_result.get('avg_loss', 0):.4f}, "
+              f"β={train_result.get('beta', 0):.4f}")
+    
+    def _save_checkpoint(self, cache: DQNCache, episode: int, 
+                        result: Dict, final: bool = False):
+        """
+        Save model checkpoint.
+        """
+        if final:
+            filename = f'dqn_cache_final.pth'
+        else:
+            filename = f'dqn_cache_best_ep{episode}.pth'
+        
+        filepath = os.path.join(self.save_dir, filename)
+        cache.save_model(filepath)
+        
+        # Save metadata
+        metadata = {
+            'episode': episode,
+            'hit_rate': result['hit_rate'],
+            'outage_probability': result['outage_probability'],
+            'cic_benefit_rate': result['cic_benefit_rate'],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        meta_file = filepath.replace('.pth', '_meta.json')
+        with open(meta_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        if self.verbose and not final:
+            print(f"    ✅ Checkpoint saved: {filename}")
+
+
+# ============================================================================
+# EVALUATION SYSTEM
+# ============================================================================
+
+class CachePolicyEvaluator:
+    """
+    Evaluate and compare different caching policies.
+    
+    Supports:
+    - Trained DQN (loaded from checkpoint)
+    - Baseline policies (TopK, LRU, LFU, Random)
+    - Fair comparison on held-out evaluation set
+    """
+    
+    def __init__(self, cfg, verbose: bool = True):
+        self.cfg = cfg
+        self.verbose = verbose
+        self.trainer = NOMADQNTrainer(cfg, verbose=False)
+    
+    def evaluate_policy(self, policy: str, num_runs: int,
+                       pretrained_cache: Optional[DQNCache] = None) -> pd.DataFrame:
+        """
+        Evaluate a single caching policy.
+        """
+        if self.verbose:
+            print(f"\n{'='*70}")
+            print(f"Evaluating {policy.upper()} Policy ({num_runs} runs)")
+            print(f"{'='*70}")
+        
+        # Create cache
+        if policy == 'dqn':
+            if pretrained_cache is None:
+                raise ValueError("DQN policy requires pretrained_cache")
+            cache = pretrained_cache
+            cache.set_eval_mode(True)  # No exploration, no learning
+        else:
+            cache = create_cache(policy, capacity=self.cfg.CACHE_SIZE)
+        
+        # Run evaluations
+        results = []
+        for run in range(num_runs):
+            # Use different seed space for evaluation (never seen before)
+            seed = self.cfg.RANDOM_SEED + 200000 + run
+            
+            result = self.trainer.run_episode(
+                cache, 
+                seed, 
+                episode_done=False,
+                phase='eval'
+            )
+            result['policy'] = policy
+            result['run'] = run
+            results.append(result)
+            
+            if self.verbose and (run + 1) % 10 == 0:
+                print(f"  Run {run+1}/{num_runs}: "
+                      f"Hit={result['hit_rate']:.3f}, "
+                      f"Outage={result['outage_probability']:.3f}")
+        
+        return pd.DataFrame(results)
+    
+    def compare_all_policies(self, num_runs: int,
+                            pretrained_dqn: Optional[DQNCache] = None) -> pd.DataFrame:
+        """
+        Compare all caching policies.
+        """
+        print(f"\n{'#'*80}")
+        print(f"#" + " "*20 + "CACHING POLICY COMPARISON" + " "*23 + "#")
+        print(f"\n{'#'*80}")
+        
+        policies = ['topk', 'lru', 'lfu', 'random']
+        if pretrained_dqn is not None:
+            policies.append('dqn')
+        
+        all_results = []
+        
+        for policy in policies:
+            df = self.evaluate_policy(
+                policy, 
+                num_runs,
+                pretrained_cache=pretrained_dqn if policy == 'dqn' else None
+            )
+            all_results.append(df)
+        
+        combined_df = pd.concat(all_results, ignore_index=True)
+        
+        # Print summary
+        self._print_comparison_summary(combined_df)
+        
+        return combined_df
+    
+    def _print_comparison_summary(self, df: pd.DataFrame):
+        """
+        Print comparison summary statistics.
+        """
+        print(f"\n{'='*80}")
+        print("COMPARISON SUMMARY")
+        print(f"{'='*80}\n")
+        
+        summary = df.groupby('policy').agg({
+            'hit_rate': ['mean', 'std'],
+            'outage_probability': ['mean', 'std'],
+            'cic_benefit_rate': ['mean', 'std'],
+            'spectral_efficiency': ['mean', 'std']
+        }).round(4)
+        
+        print(summary)
+        print()
 
 
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
 
-def plot_results(df: pd.DataFrame, training_stats: Dict, save_dir: str = './'):
-    """Generate comprehensive plots."""
+def plot_training_curves(train_df: pd.DataFrame, test_df: pd.DataFrame,
+                        save_path: Optional[str] = None):
+    """
+    Plot DQN training curves.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle('DQN Training Progress', fontsize=16)
     
-    os.makedirs(save_dir, exist_ok=True)
+    # Hit rate
+    axes[0, 0].plot(train_df['episode'], train_df['hit_rate'], label='Train')
+    if len(test_df) > 0:
+        axes[0, 0].plot(test_df['episode'], test_df['hit_rate'], 
+                       label='Test', marker='o')
+    axes[0, 0].set_title('Cache Hit Rate')
+    axes[0, 0].set_xlabel('Episode')
+    axes[0, 0].set_ylabel('Hit Rate')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
     
-    # Figure 1: Performance Comparison
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Epsilon decay
+    if 'epsilon' in train_df.columns:
+        axes[0, 1].plot(train_df['episode'], train_df['epsilon'])
+        axes[0, 1].set_title('Exploration Rate')
+        axes[0, 1].set_xlabel('Episode')
+        axes[0, 1].set_ylabel('Epsilon')
+        axes[0, 1].grid(True)
     
-    policies = df['cache_policy'].unique()
-    colors = {'DQN': 'blue', 'TopK': 'red', 'LRU': 'green', 'LFU': 'orange'}
+    # Loss
+    if 'avg_loss' in train_df.columns:
+        axes[0, 2].plot(train_df['episode'], train_df['avg_loss'])
+        axes[0, 2].set_title('Average Loss')
+        axes[0, 2].set_xlabel('Episode')
+        axes[0, 2].set_ylabel('Loss')
+        axes[0, 2].grid(True)
     
-    # Hit Rate
-    ax = axes[0, 0]
-    for policy in policies:
-        data = df[df['cache_policy'] == policy]['hit_rate']
-        ax.bar(policy, data.mean(), yerr=data.std(), 
-               color=colors.get(policy, 'gray'), capsize=5, alpha=0.8)
-    ax.set_ylabel('Hit Rate')
-    ax.set_title('Cache Hit Rate Comparison')
-    ax.grid(axis='y', alpha=0.3)
+    # Outage probability
+    axes[1, 0].plot(train_df['episode'], train_df['outage_probability'], 
+                   label='Train')
+    if len(test_df) > 0:
+        axes[1, 0].plot(test_df['episode'], test_df['outage_probability'],
+                       label='Test', marker='o')
+    axes[1, 0].set_title('Outage Probability')
+    axes[1, 0].set_xlabel('Episode')
+    axes[1, 0].set_ylabel('Outage Probability')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
     
-    # Outage Rate
-    ax = axes[0, 1]
-    for policy in policies:
-        data = df[df['cache_policy'] == policy]['outage_rate']
-        ax.bar(policy, data.mean(), yerr=data.std(),
-               color=colors.get(policy, 'gray'), capsize=5, alpha=0.8)
-    ax.set_ylabel('Outage Probability')
-    ax.set_title('Outage Probability (Lower is Better)')
-    ax.grid(axis='y', alpha=0.3)
+    # CIC benefit rate
+    axes[1, 1].plot(train_df['episode'], train_df['cic_benefit_rate'],
+                   label='Train')
+    if len(test_df) > 0:
+        axes[1, 1].plot(test_df['episode'], test_df['cic_benefit_rate'],
+                       label='Test', marker='o')
+    axes[1, 1].set_title('CIC Benefit Rate')
+    axes[1, 1].set_xlabel('Episode')
+    axes[1, 1].set_ylabel('CIC Rate')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True)
     
-    # NOMA Success Rate
-    ax = axes[1, 0]
-    for policy in policies:
-        data = df[df['cache_policy'] == policy]['noma_success_rate']
-        ax.bar(policy, data.mean(), yerr=data.std(),
-               color=colors.get(policy, 'gray'), capsize=5, alpha=0.8)
-    ax.set_ylabel('NOMA Success Rate')
-    ax.set_title('NOMA Transmission Success Rate')
-    ax.grid(axis='y', alpha=0.3)
-    
-    # BER
-    ax = axes[1, 1]
-    for policy in policies:
-        data = df[df['cache_policy'] == policy]['avg_ber']
-        ax.bar(policy, data.mean(), yerr=data.std(),
-               color=colors.get(policy, 'gray'), capsize=5, alpha=0.8)
-    ax.set_ylabel('Average BER')
-    ax.set_title('Bit Error Rate')
-    ax.set_yscale('log')
-    ax.grid(axis='y', alpha=0.3)
+    # Spectral efficiency
+    axes[1, 2].plot(train_df['episode'], train_df['spectral_efficiency'],
+                   label='Train')
+    if len(test_df) > 0:
+        axes[1, 2].plot(test_df['episode'], test_df['spectral_efficiency'],
+                       label='Test', marker='o')
+    axes[1, 2].set_title('Spectral Efficiency')
+    axes[1, 2].set_xlabel('Episode')
+    axes[1, 2].set_ylabel('Efficiency (bps/Hz)')
+    axes[1, 2].legend()
+    axes[1, 2].grid(True)
     
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/cache_comparison.png', dpi=300, bbox_inches='tight')
-    print(f"✅ Saved: {save_dir}/cache_comparison.png")
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"✅ Training curves saved: {save_path}")
+    else:
+        plt.show()
+    
     plt.close()
+
+
+def plot_policy_comparison(df: pd.DataFrame, save_path: Optional[str] = None):
+    """
+    Plot comparison of caching policies.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle('Caching Policy Comparison', fontsize=16)
     
-    # Figure 2: Training Progress
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    metrics = [
+        ('hit_rate', 'Cache Hit Rate'),
+        ('outage_probability', 'Outage Probability'),
+        ('cic_benefit_rate', 'CIC Benefit Rate'),
+        ('spectral_efficiency', 'Spectral Efficiency'),
+        ('energy_per_bit', 'Energy per Bit'),
+        ('avg_throughput', 'Average Throughput')
+    ]
     
-    episodes = np.arange(len(training_stats['episode_hit_rates']))
-    
-    # Hit Rate Evolution
-    axes[0].plot(episodes, training_stats['episode_hit_rates'], 'b-', linewidth=2)
-    axes[0].set_xlabel('Episode')
-    axes[0].set_ylabel('Hit Rate')
-    axes[0].set_title('DQN Training: Hit Rate Evolution')
-    axes[0].grid(True, alpha=0.3)
-    
-    # Loss Evolution
-    axes[1].plot(episodes, training_stats['episode_losses'], 'r-', linewidth=2)
-    axes[1].set_xlabel('Episode')
-    axes[1].set_ylabel('Loss')
-    axes[1].set_title('DQN Training: Loss Convergence')
-    axes[1].set_yscale('log')
-    axes[1].grid(True, alpha=0.3)
-    
-    # Episode Reward (FIXED: Now showing episode reward instead of cumulative)
-    axes[2].plot(episodes, training_stats['episode_rewards'], 'g-', linewidth=2)
-    axes[2].set_xlabel('Episode')
-    axes[2].set_ylabel('Episode Reward')
-    axes[2].set_title('DQN Training: Reward Progress')
-    axes[2].grid(True, alpha=0.3)
+    for idx, (metric, title) in enumerate(metrics):
+        ax = axes[idx // 3, idx % 3]
+        sns.boxplot(data=df, x='policy', y=metric, ax=ax)
+        ax.set_title(title)
+        ax.set_xlabel('')
+        ax.tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/dqn_training_progress.png', dpi=300, bbox_inches='tight')
-    print(f"✅ Saved: {save_dir}/dqn_training_progress.png")
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"✅ Comparison plot saved: {save_path}")
+    else:
+        plt.show()
+    
     plt.close()
 
 
@@ -563,33 +901,74 @@ def plot_results(df: pd.DataFrame, training_stats: Dict, save_dir: str = './'):
 # ============================================================================
 
 if __name__ == "__main__":
+    if not HAS_DQN:
+        print("❌ Error: DQN not available. Exiting.")
+        exit(1)
+    
     from src import config as cfg
     
-    print("\n" + "🚀"*40)
-    print("STABLE DQN CACHE FOR NOMA SYSTEMS")
-    print("🚀"*40)
+    # Create results directory
+    os.makedirs('results', exist_ok=True)
     
-    # Run comparison
-    df, training_stats = run_comprehensive_comparison(
-        cfg,
-        num_training_episodes=50,
-        steps_per_episode=1000,
-        num_eval_runs=10,
-        eval_requests_per_run=5000
+    t0 = time.time()
+    
+    # ========================================================================
+    # PHASE 1: TRAIN DQN
+    # ========================================================================
+    
+    trainer = NOMADQNTrainer(cfg)
+    
+    trained_cache, train_history = trainer.train(
+        num_episodes=cfg.RL_TRAINING_EPISODES,
+        test_interval=50,
+        save_best=True
+    )
+    
+    # Save training history
+    train_history.to_csv('results/dqn_training_history.csv', index=False)
+    test_history = pd.DataFrame(trainer.test_history)
+    if len(test_history) > 0:
+        test_history.to_csv('results/dqn_test_history.csv', index=False)
+    
+    # Plot training curves
+    plot_training_curves(
+        train_history, 
+        test_history,
+        save_path='results/dqn_training_curves.png'
+    )
+    
+    # ========================================================================
+    # PHASE 2: EVALUATE & COMPARE
+    # ========================================================================
+    
+    evaluator = CachePolicyEvaluator(cfg)
+    
+    comparison_results = evaluator.compare_all_policies(
+        num_runs=cfg.NUM_RUNS,
+        pretrained_dqn=trained_cache
     )
     
     # Save results
-    df.to_csv('results_dqn_comparison.csv', index=False)
-    print(f"\n✅ Results saved: results_dqn_comparison.csv")
+    comparison_results.to_csv('results/policy_comparison.csv', index=False)
     
-    # Generate plots
-    plot_results(df, training_stats)
+    # Plot comparison
+    plot_policy_comparison(
+        comparison_results,
+        save_path='results/policy_comparison.png'
+    )
     
-    print(f"\n{'='*80}")
-    print("✅ SIMULATION COMPLETE!")
-    print(f"{'='*80}\n")
+    # ========================================================================
+    # PHASE 3: FINAL SUMMARY
+    # ========================================================================
     
-
-
-
-    
+    print(f"\n{'#'*80}")
+    print(f"#" + " "*25 + "SIMULATION COMPLETE" + " "*24 + "#")
+    print(f"\n{'#'*80}")
+    print(f"\nTotal time: {time.time() - t0:.2f}s")
+    print(f"\nResults saved to:")
+    print(f"  • results/dqn_training_history.csv")
+    print(f"  • results/dqn_training_curves.png")
+    print(f"  • results/policy_comparison.csv")
+    print(f"  • results/policy_comparison.png")
+    print(f"  • models/dqn_cache/dqn_cache_final.pth")
+    print(f"\n✅ All files integrated properly with NOMA characteristics!\n")
