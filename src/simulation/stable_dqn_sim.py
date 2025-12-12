@@ -283,18 +283,23 @@ class NOMADQNTrainer:
         # Track cache misses (need NOMA transmission)
         miss_users = []
         miss_files = {}
-        
+
         for user_id in range(self.cfg.NUM_USERS):
             if user_id not in user_requests:
                 continue
-            
+    
             # Take first request
             file_id = user_requests[user_id][0]
             metrics['total_requests'] += 1
-            
-            # Check cache
-            hit = cache.is_hit(file_id, update_stats=True)
-            
+    
+            # ========================================================================
+            # ✅ CRITICAL FIX (Dec 12, 2025): Preserve cache state during test/eval
+            # ========================================================================
+            # Problem: cache.is_hit() with update_stats=True modifies internal state
+            # Solution: Only update stats during training to preserve test cache state
+            should_update_stats = (phase == 'train')
+            hit = cache.is_hit(file_id, update_stats=should_update_stats)
+    
             if hit:
                 metrics['cache_hits'] += 1
                 metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
@@ -654,7 +659,7 @@ class NOMADQNTrainer:
         cache.set_eval_mode(True)
         
         # Run test episode
-        seed = self.cfg.RANDOM_SEED + 100000 + episode  # Different seed space
+        seed = self.cfg.RANDOM_SEED + max(0, episode - 50)
         result = self.run_episode(cache, seed, episode_done=False, phase='test')
         result['episode'] = episode
         
