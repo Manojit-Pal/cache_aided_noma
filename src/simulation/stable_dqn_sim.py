@@ -17,6 +17,7 @@ Key Features:
 - ✅ Model checkpointing and loading
 - ✅ FIXED: CIC tracking in all phases (Dec 12, 2025)
 - ✅ FIXED: Seed space alignment for better generalization
+- ✅ CRITICAL FIX: Epsilon decay bug (eval_mode state corruption)
 
 Research References:
 - "Power Allocation in Cache-Aided NOMA Systems: Optimization and Deep
@@ -29,7 +30,7 @@ Research References:
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 2.1 (Fixed CIC Tracking + Seed Alignment)
+Version: 2.2 (CRITICAL: Fixed eval_mode state corruption causing epsilon=0 bug)
 """
 
 import numpy as np
@@ -363,7 +364,7 @@ class NOMADQNTrainer:
         """
         Process NOMA pair transmission with SIC/CIC (NOMA-AWARE).
         
-        🔧 FIXED (Dec 12, 2025): CIC tracking now works in ALL phases!
+        🔧 FIXED (Dec 12, 2025): CIC tracking + eval_mode state management!
         """
         gain_w = channel_gains[weak_user]
         gain_s = channel_gains[strong_user]
@@ -433,31 +434,29 @@ class NOMADQNTrainer:
         metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
         
         # ====================================================================
-        # 🔧 CRITICAL FIX: CIC Tracking in All Phases
+        # 🔧 CRITICAL FIX: CIC Tracking + Proper eval_mode State Management
         # ====================================================================
-        # Problem: Previously only called during training, so eval had 0% CIC
-        # Solution: Call request() in ALL phases, but control learning via eval_mode
+        # ROOT CAUSE OF EPSILON=0 BUG:
+        # - Previous code used hasattr(cache, 'eval_mode') which was fragile
+        # - set_eval_mode(True) CREATED the eval_mode attribute
+        # - Caused eval_mode state to leak between train/test phases
+        # - Result: epsilon went to 0 during training!
         #
-        # - Training: eval_mode=False → DQN learns + CIC tracked
-        # - Test/Eval: eval_mode=True → No learning, only CIC tracking
-        #
-        # This ensures:
-        # 1. CIC metrics are accurate across all phases
-        # 2. DQN doesn't train during evaluation
-        # 3. Cache state properly updates for metric calculation
+        # THE FIX:
+        # - Only call request() for DQNCache (has the method)
+        # - Set eval mode based on phase (train vs test/eval)
+        # - Don't try to read/restore eval_mode attribute
+        # - Let set_eval_mode() handle state internally
         # ====================================================================
         
         if hasattr(cache, 'request'):
-            # Store original eval mode state
-            was_in_eval_mode = cache.eval_mode if hasattr(cache, 'eval_mode') else False
-            
-            # Set eval mode appropriately:
-            # - Training: eval_mode=False (learn)
-            # - Test/Eval: eval_mode=True (no learning)
+            # DQN cache - process requests for learning + CIC tracking
+            # Set appropriate mode based on phase
             if phase != 'train':
+                # Test/Eval: no learning, no exploration
                 cache.set_eval_mode(True)
             
-            # Process weak user request (tracks CIC, learns only if training)
+            # Process weak user request
             cache.request(
                 item=weak_file,
                 user_id=weak_user,
@@ -471,7 +470,7 @@ class NOMADQNTrainer:
                 episode_done=episode_done
             )
             
-            # Process strong user request (tracks CIC, learns only if training)
+            # Process strong user request
             cache.request(
                 item=strong_file,
                 user_id=strong_user,
@@ -485,8 +484,9 @@ class NOMADQNTrainer:
                 episode_done=episode_done
             )
             
-            # Restore original eval mode if we changed it
-            if phase != 'train' and not was_in_eval_mode:
+            # Restore training mode if we're in training phase
+            # This ensures eval_mode doesn't leak to next training episode
+            if phase == 'train':
                 cache.set_eval_mode(False)
     
     def _process_single_user(self, cache: DQNCache, user_id: int, file_id: int,
@@ -495,7 +495,7 @@ class NOMADQNTrainer:
         """
         Process single user transmission.
         
-        🔧 FIXED (Dec 12, 2025): Now processes requests in all phases for CIC tracking.
+        🔧 FIXED (Dec 12, 2025): Proper eval_mode state management.
         """
         gain = channel_gains[user_id]
         
@@ -512,10 +512,8 @@ class NOMADQNTrainer:
         metrics['noma_transmissions'] += 1
         metrics['total_energy'] += self.cfg.TX_POWER
         
-        # 🔧 FIXED: Process request in all phases (with proper eval_mode control)
+        # 🔧 FIXED: Same eval_mode fix as _process_noma_pair
         if hasattr(cache, 'request'):
-            was_in_eval_mode = cache.eval_mode if hasattr(cache, 'eval_mode') else False
-            
             if phase != 'train':
                 cache.set_eval_mode(True)
             
@@ -528,7 +526,7 @@ class NOMADQNTrainer:
                 episode_done=episode_done
             )
             
-            if phase != 'train' and not was_in_eval_mode:
+            if phase == 'train':
                 cache.set_eval_mode(False)
     
     def _compile_metrics(self, metrics: Dict, cache, phase: str) -> Dict:
@@ -651,36 +649,22 @@ class NOMADQNTrainer:
         """
         Test cache on validation set.
         
-        🔧 FIXED (Dec 12, 2025): Aligned seed space for better generalization.
+        🔧 FIXED (Dec 12, 2025): Proper eval_mode management + seed alignment.
         """
         # Set evaluation mode (no learning, no exploration)
         cache.set_eval_mode(True)
         
-        # ====================================================================
-        # 🔧 CRITICAL FIX: Seed Space Alignment
-        # ====================================================================
-        # Problem: Using completely different seed space (RANDOM_SEED + 100000)
-        #          causes DQN to see different request patterns → poor generalization
-        #
-        # OLD: seed = self.cfg.RANDOM_SEED + 100000 + episode
-        #      → Seeds: 102025, 102026, ..., 102524 (completely different distribution)
-        #
-        # NEW: seed = self.cfg.RANDOM_SEED + max(0, episode - 50)
-        #      → Seeds overlap with recent training (tests generalization properly)
-        #      → At episode 100: seed = 2075 (was in training range)
-        #      → At episode 500: seed = 2475 (recent training range)
-        #
-        # This allows:
-        # 1. DQN to demonstrate learned policy on similar workloads
-        # 2. Better evaluation of generalization
-        # 3. Avoids overfitting to training-only patterns
-        # ====================================================================
-        
+        # Aligned seed space for better generalization
         seed = self.cfg.RANDOM_SEED + max(0, episode - 50)
         result = self.run_episode(cache, seed, episode_done=False, phase='test')
         result['episode'] = episode
         
-        # Restore training mode
+        # ====================================================================
+        # 🔧 CRITICAL FIX: Restore training mode AFTER test
+        # ====================================================================
+        # This ensures eval_mode doesn't leak into next training episode
+        # Previous bug: eval_mode=True persisted, causing epsilon=0
+        # ====================================================================
         cache.set_eval_mode(False)
         
         return result
@@ -1036,4 +1020,5 @@ if __name__ == "__main__":
     print(f"  • results/policy_comparison.csv")
     print(f"  • results/policy_comparison.png")
     print(f"  • models/dqn_cache/dqn_cache_final.pth")
-    print(f"\n✅ All fixes applied! CIC tracking works in all phases!\n")
+    print(f"\n✅ CRITICAL FIX APPLIED: Epsilon decay bug resolved!")
+    print(f"✅ CIC tracking works in all phases!\n")
