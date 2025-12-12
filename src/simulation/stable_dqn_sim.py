@@ -15,9 +15,6 @@ Key Features:
 - ✅ Baseline comparison (TopK, LRU, LFU, Random)
 - ✅ Comprehensive metrics tracking
 - ✅ Model checkpointing and loading
-- ✅ FIXED: CIC tracking in all phases (Dec 12, 2025)
-- ✅ FIXED: AttributeError on non-DQN caches (Dec 12, 2025)
-- ✅ FIXED: Correct CIC detection logic (Dec 12, 2025)
 
 Research References:
 - "Power Allocation in Cache-Aided NOMA Systems: Optimization and Deep
@@ -30,7 +27,7 @@ Research References:
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 2.3 (Fixed AttributeError + CIC logic + Stats preservation)
+Version: 2.0 (NOMA-Aware with Train-Test-Eval)
 """
 
 import numpy as np
@@ -136,10 +133,8 @@ class NOMADQNTrainer:
         print(f"  NOMA Pairing: {self.cfg.PAIRING_METHOD}")
         print(f"  Power Allocation: {self.cfg.POWER_ALLOC_METHOD}")
         print(f"  CIC Enabled: {self.cfg.ENABLE_CIC}")
-        print(f"  Target Rate: {self.cfg.TARGET_RATE_BPS/1e6:.1f} Mbps")
+        print(f"  Target Rate: {self.cfg.TARGET_RATE_BPS:.2f} bps/Hz")
         print(f"\nDQN Hyperparameters:")
-        print(f"  Training Episodes: {self.cfg.RL_TRAINING_EPISODES}")
-        print(f"  Steps per Episode: {self.cfg.RL_STEPS_PER_EPISODE}")
         print(f"  Learning Rate: {self.cfg.RL_LEARNING_RATE}")
         print(f"  Gamma: {self.cfg.RL_GAMMA}")
         print(f"  Epsilon: {self.cfg.RL_EPSILON_START} → {self.cfg.RL_EPSILON_END}")
@@ -200,14 +195,14 @@ class NOMADQNTrainer:
             seed=seed
         )
     
-    def run_episode(self, cache, seed: int, 
+    def run_episode(self, cache: DQNCache, seed: int, 
                    episode_done: bool = False,
                    phase: str = 'train') -> Dict:
         """
         Run a single NOMA-aware episode.
         
         Args:
-            cache: Cache instance (DQN or baseline)
+            cache: DQN cache instance
             seed: Random seed
             episode_done: Whether this is the last episode
             phase: 'train', 'test', or 'eval'
@@ -288,23 +283,23 @@ class NOMADQNTrainer:
         # Track cache misses (need NOMA transmission)
         miss_users = []
         miss_files = {}
-        
+
         for user_id in range(self.cfg.NUM_USERS):
             if user_id not in user_requests:
                 continue
-            
+    
             # Take first request
             file_id = user_requests[user_id][0]
             metrics['total_requests'] += 1
-            
-            # ================================================================
-            # 🔧 CRITICAL FIX (Dec 12, 2025): Preserve cache state during test/eval
-            # ================================================================
+    
+            # ========================================================================
+            # ✅ CRITICAL FIX (Dec 12, 2025): Preserve cache state during test/eval
+            # ========================================================================
             # Problem: cache.is_hit() with update_stats=True modifies internal state
             # Solution: Only update stats during training to preserve test cache state
             should_update_stats = (phase == 'train')
             hit = cache.is_hit(file_id, update_stats=should_update_stats)
-            
+    
             if hit:
                 metrics['cache_hits'] += 1
                 metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
@@ -362,21 +357,21 @@ class NOMADQNTrainer:
         
         return self._compile_metrics(metrics, cache, phase)
     
-    def _process_noma_pair(self, cache, weak_user: int, strong_user: int,
-                           weak_file: int, strong_file: int,
-                           channel_gains: np.ndarray, sinr_threshold: float,
-                           metrics: Dict, episode_done: bool, phase: str):
+    def _process_noma_pair(self, cache: DQNCache, weak_user: int, strong_user: int,
+                       weak_file: int, strong_file: int,
+                       channel_gains: np.ndarray, sinr_threshold: float,
+                       metrics: Dict, episode_done: bool, phase: str):
         """
         Process NOMA pair transmission with SIC/CIC (NOMA-AWARE).
-        
-        🔧 FIXED (Dec 12, 2025): Correct CIC detection logic + AttributeError fix
-        
+    
+        ✅ FIXED (Dec 12, 2025): Correct CIC detection logic
+    
         Cache-Aided Interference Cancellation (CIC) Logic:
         - Weak user can use CIC if STRONG user's file is cached (cancels strong's interference)
         - Strong user can use CIC if WEAK user's file is cached (perfect SIC decoding)
         - Power allocation uses OWN file cache status (priority assignment)
         - SIC/CIC simulation uses PAIRED file cache status (interference cancellation)
-        
+
         Research References:
         - IEEE TWC 2022: "Cache-Aided NOMA Mobile Edge Computing"
         - arXiv:1712.09557: "Cache-Aided Non-Orthogonal Multiple Access"
@@ -384,25 +379,25 @@ class NOMADQNTrainer:
         """
         gain_w = channel_gains[weak_user]
         gain_s = channel_gains[strong_user]
-        
+
         metrics['noma_transmissions'] += 1
-        
-        # ====================================================================
-        # 🔧 CRITICAL FIX: Separate cache checks for power allocation vs CIC
-        # ====================================================================
-        
+
+        # ========================================================================
+        # ✅ CRITICAL FIX: Separate cache checks for power allocation vs CIC
+        # ========================================================================
+
         # Cache status for OWN requested files (affects power allocation priority)
         weak_file_cached = cache.is_hit(weak_file, update_stats=False)
         strong_file_cached = cache.is_hit(strong_file, update_stats=False)
-        
+
         # Cache status for PAIRED user's files (enables CIC capability)
         # KEY INSIGHT: User can cancel interference if interferer's content is cached
         weak_can_use_cic = cache.is_hit(strong_file, update_stats=False)  # Weak has strong's file
         strong_can_use_cic = cache.is_hit(weak_file, update_stats=False)  # Strong has weak's file
-        
-        # ====================================================================
+
+        # ========================================================================
         # Power Allocation (uses OWN file cache status)
-        # ====================================================================
+        # ========================================================================
         # Cached users may get higher/lower power based on cache-aware strategy
         p_weak, p_strong, feasible, _ = allocate_power(
             gain_w=gain_w,
@@ -413,10 +408,10 @@ class NOMADQNTrainer:
             strong_cached=strong_file_cached,  # ✅ Strong user's own file status
             grid_points=self.cfg.POWER_ALLOC_GRID
         )
-        
-        # ====================================================================
+            
+        # ========================================================================
         # Simulate SIC/CIC (uses PAIRED file cache status)
-        # ====================================================================
+        # ========================================================================
         # CIC is enabled when user has interfering signal cached
         sic_results = simulate_sic_process(
             P_tx=self.cfg.TX_POWER,
@@ -430,34 +425,34 @@ class NOMADQNTrainer:
             weak_cached=weak_can_use_cic,  # ✅ Weak's CIC capability
             strong_cached=strong_can_use_cic  # ✅ Strong's CIC capability
         )
-        
+
         weak_success = sic_results['weak_success']
         strong_success = sic_results['strong_success']
-        
-        # ====================================================================
+
+        # ========================================================================
         # Update SIC Metrics
-        # ====================================================================
+        # ========================================================================
         metrics['sic_attempts'] += 1
         if sic_results['can_decode_weak']:
             metrics['sic_successes'] += 1
-        
-        # ====================================================================
-        # 🔧 FIXED CIC Tracking (uses correct cache status)
-        # ====================================================================
+
+        # ========================================================================
+        # ✅ FIXED CIC Tracking (uses correct cache status)
+        # ========================================================================
         # Track when CIC is actually beneficial (user succeeds with CIC help)
         if weak_can_use_cic:
             metrics['cic_opportunities'] += 1
             if weak_success:
                 metrics['cic_enabled_weak'] += 1
-        
+
         if strong_can_use_cic:
             metrics['cic_opportunities'] += 1
             if strong_success:
                 metrics['cic_enabled_strong'] += 1
-        
-        # ====================================================================
+
+        # ========================================================================
         # Transmission Outcomes
-        # ====================================================================
+        # ========================================================================
         if weak_success and strong_success:
             metrics['noma_successes'] += 1
         elif weak_success or strong_success:
@@ -466,16 +461,16 @@ class NOMADQNTrainer:
         else:
             metrics['noma_failures'] += 1
             metrics['outages'] += 2  # Both failed
-        
-        # ====================================================================
+
+        # ========================================================================
         # Throughput and Energy
-        # ====================================================================
+        # ========================================================================
         metrics['total_throughput'] += sic_results['sum_rate']
         metrics['total_energy'] += self.cfg.TX_POWER * (p_weak + p_strong)
-        
-        # ====================================================================
+
+        # ========================================================================
         # DQN Learning (only during training phase)
-        # ====================================================================
+        # ========================================================================
         if phase == 'train' and hasattr(cache, 'request'):
             # Weak user request (for DQN learning)
             cache.request(
@@ -490,22 +485,23 @@ class NOMADQNTrainer:
                 sinr_strong=sic_results['sinr_s_after'],
                 episode_done=episode_done
             )
-            
+
             # Strong user request (for DQN learning)
             cache.request(
                 item=strong_file,
                 user_id=strong_user,
                 channel_gain=gain_s,
-                paired_user=weak_user,
-                paired_file=weak_file,
-                noma_success=strong_success,
-                outage=not strong_success,
-                sinr_weak=sic_results['sinr_w'],
-                sinr_strong=sic_results['sinr_s_after'],
-                episode_done=episode_done
-            )
+               paired_user=weak_user,
+               paired_file=weak_file,
+               noma_success=strong_success,
+               outage=not strong_success,
+               sinr_weak=sic_results['sinr_w'],
+               sinr_strong=sic_results['sinr_s_after'],
+               episode_done=episode_done
+           )
+
     
-    def _process_single_user(self, cache, user_id: int, file_id: int,
+    def _process_single_user(self, cache: DQNCache, user_id: int, file_id: int,
                             channel_gains: np.ndarray, sinr_threshold: float,
                             metrics: Dict, episode_done: bool, phase: str):
         """
@@ -563,7 +559,7 @@ class NOMADQNTrainer:
                 (metrics['cic_enabled_weak'] + metrics['cic_enabled_strong']) / total_noma_users 
                 if total_noma_users > 0 else 0.0
             ),
-            
+
             # Throughput
             'avg_throughput': metrics['total_throughput'] / total_req,
             'spectral_efficiency': metrics['total_throughput'] / total_noma,
@@ -658,12 +654,9 @@ class NOMADQNTrainer:
     def _test_cache(self, cache: DQNCache, episode: int) -> Dict:
         """
         Test cache on validation set.
-        
-        🔧 FIXED (Dec 12, 2025): Only call set_eval_mode() if method exists
         """
         # Set evaluation mode (no learning, no exploration)
-        if hasattr(cache, 'set_eval_mode'):
-            cache.set_eval_mode(True)
+        cache.set_eval_mode(True)
         
         # Run test episode
         seed = self.cfg.RANDOM_SEED + episode + 10000
@@ -671,8 +664,7 @@ class NOMADQNTrainer:
         result['episode'] = episode
         
         # Restore training mode
-        if hasattr(cache, 'set_eval_mode'):
-            cache.set_eval_mode(False)
+        cache.set_eval_mode(False)
         
         return result
     
@@ -689,7 +681,7 @@ class NOMADQNTrainer:
               f"CIC={test_result['cic_benefit_rate']:.4f}")
         print(f"    DQN:   ε={train_result.get('epsilon', 0):.4f}, "
               f"Loss={train_result.get('avg_loss', 0):.4f}, "
-              f"β={train_result.get('per_beta', 0):.4f}")
+              f"β={train_result.get('beta', 0):.4f}")
     
     def _save_checkpoint(self, cache: DQNCache, episode: int, 
                         result: Dict, final: bool = False):
@@ -755,8 +747,7 @@ class CachePolicyEvaluator:
             if pretrained_cache is None:
                 raise ValueError("DQN policy requires pretrained_cache")
             cache = pretrained_cache
-            if hasattr(cache, 'set_eval_mode'):
-                cache.set_eval_mode(True)  # No exploration, no learning
+            cache.set_eval_mode(True)  # No exploration, no learning
         else:
             cache = create_cache(policy, capacity=self.cfg.CACHE_SIZE)
         
@@ -779,8 +770,7 @@ class CachePolicyEvaluator:
             if self.verbose and (run + 1) % 10 == 0:
                 print(f"  Run {run+1}/{num_runs}: "
                       f"Hit={result['hit_rate']:.3f}, "
-                      f"Outage={result['outage_probability']:.3f}, "
-                      f"CIC={result['cic_benefit_rate']:.3f}")
+                      f"Outage={result['outage_probability']:.3f}")
         
         return pd.DataFrame(results)
     
@@ -1028,6 +1018,4 @@ if __name__ == "__main__":
     print(f"  • results/policy_comparison.csv")
     print(f"  • results/policy_comparison.png")
     print(f"  • models/dqn_cache/dqn_cache_final.pth")
-    print(f"\n✅ ALL CRITICAL FIXES APPLIED!")
-    print(f"✅ CIC tracking works in all phases!")
-    print(f"✅ No more AttributeError!\n")
+    print(f"\n✅ All files integrated properly with NOMA characteristics!\n")
