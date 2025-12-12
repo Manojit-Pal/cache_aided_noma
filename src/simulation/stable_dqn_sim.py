@@ -659,7 +659,7 @@ class NOMADQNTrainer:
         cache.set_eval_mode(True)
         
         # Run test episode
-        seed = self.cfg.RANDOM_SEED + max(0, episode - 50)
+        seed = self.cfg.RANDOM_SEED + episode + 10000
         result = self.run_episode(cache, seed, episode_done=False, phase='test')
         result['episode'] = episode
         
