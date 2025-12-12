@@ -10,6 +10,8 @@ This module implements:
 - Performance metrics (sum rate, spectral efficiency, fairness)
 - Multi-user NOMA scheduling
 
+✅ FIX #1 APPLIED: CIC tracking now uses list to properly handle both users cached
+
 Author: Cache-Aided NOMA Team
 Date: December 2025
 """
@@ -95,7 +97,7 @@ def sinr_to_ber_qpsk(sinr: float) -> float:
 
 
 # ============================================================================
-# BASIC NOMA PAIR SIMULATION
+# BASIC NOMA PAIR SIMULATION (✅ FIX #1 APPLIED)
 # ============================================================================
 
 def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg, 
@@ -104,6 +106,8 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
                        ) -> Tuple[bool, bool, Dict]:
     """
     Simulate NOMA transmission for a two-user pair with optional cache-aided SIC.
+    
+    ✅ FIX #1: CIC tracking now uses 'cic_users' list instead of single 'cic_user' string
     
     This is the core NOMA transmission function that:
     1. Computes SINR for weak user (treats strong as interference)
@@ -130,6 +134,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
             - BER estimates
             - Achievable rates
             - CIC benefits
+            - 'cic_users': List of users benefiting from CIC (['weak'], ['strong'], or ['weak', 'strong'])
     
     Cache-Aided Interference Cancellation (CIC):
         If a user has the interfering content cached, they can perfectly cancel
@@ -140,8 +145,9 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
     Example:
         >>> weak_ok, strong_ok, info = simulate_noma_pair(
         ...     gain_weak=1e-8, gain_strong=1e-6, cfg=config,
-        ...     weak_cached=True  # Weak user has strong's content cached
+        ...     weak_cached=True, strong_cached=True
         ... )
+        >>> print(info['cic_users'])  # ['weak', 'strong']
     """
     # Get power allocation
     P = cfg.TX_POWER
@@ -153,7 +159,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
     zeta = cfg.SIC_IMPERFECTION
     sinr_th = sinr_threshold_from_rate(cfg.TARGET_RATE_BPS)
     
-    # Initialize info dictionary
+    # ✅ FIX #1: Initialize with 'cic_users' list instead of 'cic_user' string
     info = {
         'p_w': p_w,
         'p_s': p_s,
@@ -161,7 +167,8 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         'gain_strong': gain_strong,
         'weak_cached': weak_cached,
         'strong_cached': strong_cached,
-        'cic_applied': False
+        'cic_applied': False,
+        'cic_users': []  # ✅ Changed from string to list
     }
     
     # -------------------------------------------------------------------------
@@ -172,7 +179,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         # If weak user has strong user's content cached, can cancel interference
         sinr_w = (P * p_w * gain_weak) / N0  # No interference from strong user
         info['cic_applied'] = True
-        info['cic_user'] = 'weak'
+        info['cic_users'].append('weak')  # ✅ Append to list
     else:
         # Standard NOMA: weak user treats strong as interference
         sinr_w = sinr_weak_user(P, p_w, gain_weak, p_s, N0)
@@ -202,7 +209,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         # Strong user has weak user's content cached → perfect SIC
         residual = 0.0  # Perfect cancellation
         info['cic_applied'] = True
-        info['cic_user'] = 'strong' if not info.get('cic_applied') else 'both'
+        info['cic_users'].append('strong')  # ✅ Append to list (no conditional logic)
     else:
         # Standard SIC with imperfection
         if can_decode_weak:
@@ -362,13 +369,10 @@ def pair_users_sequential(channel_gains: np.ndarray, user_indices: Optional[np.n
     return pairs
 
 
-# ✅ BUG FIX #6: Corrected signature to accept users list first, then channel_gains
 def pair_users(users: List[int], channel_gains: np.ndarray, 
                method: str = 'extreme') -> Tuple[List[Tuple[int, int]], Optional[int]]:
     """
     Universal user pairing function with multiple strategies.
-    
-    ✅ CORRECTED SIGNATURE: Now accepts users list first (matches simulation code)
     
     Args:
         users: List of user IDs to pair (e.g., users with cache misses)
@@ -414,7 +418,7 @@ def pair_users(users: List[int], channel_gains: np.ndarray,
 
 
 # ============================================================================
-# MULTI-USER NOMA SIMULATION
+# MULTI-USER NOMA SIMULATION (✅ FIX #1 APPLIED)
 # ============================================================================
 
 def simulate_noma_system(channel_gains: np.ndarray, cfg, 
@@ -424,6 +428,8 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
                         ) -> Dict:
     """
     Simulate complete NOMA system for all user pairs.
+    
+    ✅ FIX #1: Now tracks detailed CIC statistics (weak, strong, both)
     
     This function orchestrates the entire NOMA transmission:
     1. Pair users based on channel conditions
@@ -450,6 +456,7 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
             - average_ber
             - cache_hit_rate (if cache_status provided)
             - cic_benefit (improvement from cache-aided cancellation)
+            - weak_cic_count, strong_cic_count, both_cic_count (✅ NEW)
     
     Example:
         >>> positions = generate_user_positions(200, 500, seed=42)
@@ -457,11 +464,12 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         >>> cache_status = {i: (i < 20) for i in range(200)}  # First 20 cached
         >>> results = simulate_noma_system(gains, cfg, cache_status=cache_status)
         >>> print(f"Outage: {results['system_metrics']['outage_probability']:.2%}")
+        >>> print(f"Both CIC: {results['system_metrics']['both_cic_count']} pairs")
     """
     num_users = len(channel_gains)
     all_users = list(range(num_users))
     
-    # Create user pairs (updated to use new signature)
+    # Create user pairs
     pairs, leftover = pair_users(all_users, channel_gains, method=pairing_method)
     
     # Initialize cache status if not provided
@@ -526,9 +534,14 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
     cache_hit_count = sum(1 for i in range(num_users) if cache_status.get(i, False))
     cache_hit_rate = cache_hit_count / num_users if num_users > 0 else 0
     
-    # CIC benefit (how many users benefited from cache-aided cancellation)
+    # CIC benefit (how many pairs benefited from cache-aided cancellation)
     cic_applied_count = sum(1 for r in pair_results if r.get('cic_applied', False))
     cic_benefit_rate = cic_applied_count / num_pairs if num_pairs > 0 else 0
+    
+    # ✅ FIX #1: Detailed CIC statistics
+    weak_cic_count = sum(1 for r in pair_results if 'weak' in r.get('cic_users', []))
+    strong_cic_count = sum(1 for r in pair_results if 'strong' in r.get('cic_users', []))
+    both_cic_count = sum(1 for r in pair_results if len(r.get('cic_users', [])) == 2)
     
     system_metrics = {
         'num_users': num_users,
@@ -545,6 +558,9 @@ def simulate_noma_system(channel_gains: np.ndarray, cfg,
         'average_fairness': average_fairness,
         'cache_hit_rate': cache_hit_rate,
         'cic_benefit_rate': cic_benefit_rate,
+        'weak_cic_count': weak_cic_count,  # ✅ NEW
+        'strong_cic_count': strong_cic_count,  # ✅ NEW
+        'both_cic_count': both_cic_count,  # ✅ NEW
         'pairing_method': pairing_method
     }
     
@@ -609,7 +625,7 @@ def compute_average_ber(results_list: List[Dict]) -> float:
 
 if __name__ == "__main__":
     print("="*70)
-    print("TESTING ENHANCED NOMA BASE MODULE")
+    print("TESTING ENHANCED NOMA BASE MODULE (FIX #1 APPLIED)")
     print("="*70)
     
     # Mock configuration
@@ -632,26 +648,38 @@ if __name__ == "__main__":
     print(f"Weak user success: {weak_ok}, SINR: {info['sinr_w']:.3f}")
     print(f"Strong user success: {strong_ok}, SINR: {info['sinr_s_after']:.3f}")
     print(f"Sum rate: {info['sum_rate']:.3f} bps/Hz")
+    print(f"CIC users: {info['cic_users']}")
     
-    # Test 2: Pair with CIC
-    print("\n[Test 2] NOMA pair with cache-aided cancellation...")
+    # Test 2: Pair with weak CIC
+    print("\n[Test 2] NOMA pair with weak user CIC...")
     weak_ok_cic, strong_ok_cic, info_cic = simulate_noma_pair(
         gain_weak, gain_strong, cfg, weak_cached=True
     )
     print(f"CIC applied: {info_cic['cic_applied']}")
+    print(f"CIC users: {info_cic['cic_users']}")  # Should be ['weak']
     print(f"Weak SINR improvement: {info_cic['sinr_w']/info['sinr_w']:.2f}x")
     print(f"Sum rate with CIC: {info_cic['sum_rate']:.3f} bps/Hz")
     
-    # Test 3: User pairing
-    print("\n[Test 3] User pairing strategies...")
+    # ✅ Test 3: Both users cached (FIX #1 verification)
+    print("\n[Test 3] Both users cached (FIX #1 TEST)...")
+    weak_ok_both, strong_ok_both, info_both = simulate_noma_pair(
+        gain_weak, gain_strong, cfg, weak_cached=True, strong_cached=True
+    )
+    print(f"CIC applied: {info_both['cic_applied']}")
+    print(f"CIC users: {info_both['cic_users']}")  # Should be ['weak', 'strong']
+    assert info_both['cic_users'] == ['weak', 'strong'], "❌ FIX #1 FAILED!"
+    print(f"✅ FIX #1 VERIFIED: Both users tracked correctly!")
+    
+    # Test 4: User pairing
+    print("\n[Test 4] User pairing strategies...")
     gains = np.array([1e-8, 1e-6, 1e-9, 1e-7, 1e-10, 1e-5])
     users = [0, 1, 2, 3, 4, 5]
     
     pairs_extreme, leftover = pair_users(users, gains, method='extreme')
     print(f"Extreme pairing: {pairs_extreme}, leftover: {leftover}")
     
-    # Test 4: Full system simulation
-    print("\n[Test 4] Full NOMA system simulation...")
+    # Test 5: Full system simulation
+    print("\n[Test 5] Full NOMA system simulation...")
     num_users = 20
     gains_system = np.random.exponential(1e-7, num_users)
     cache_status = {i: (i % 5 == 0) for i in range(num_users)}  # Every 5th user cached
@@ -665,7 +693,15 @@ if __name__ == "__main__":
     print(f"Outage probability: {metrics['outage_probability']:.2%}")
     print(f"Cache hit rate: {metrics['cache_hit_rate']:.2%}")
     print(f"CIC benefit rate: {metrics['cic_benefit_rate']:.2%}")
+    print(f"✅ Detailed CIC stats:")
+    print(f"  - Weak user CIC: {metrics['weak_cic_count']} pairs")
+    print(f"  - Strong user CIC: {metrics['strong_cic_count']} pairs")
+    print(f"  - Both users CIC: {metrics['both_cic_count']} pairs")
     
     print("\n" + "="*70)
     print("✅ ALL TESTS COMPLETED SUCCESSFULLY!")
+    print("✅ FIX #1 APPLIED AND VERIFIED:")
+    print("   - CIC tracking uses 'cic_users' list")
+    print("   - Both users cached case works correctly")
+    print("   - Detailed CIC statistics added to metrics")
     print("="*70)
