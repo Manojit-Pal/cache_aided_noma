@@ -1,20 +1,23 @@
-# src/caching/dynamic_cache.py
 """
+src/caching/dynamic_cache.py
+
 NOMA-Aware Dynamic Caching Policies for Cache-Aided NOMA
 
 Bug Fix History:
 - BUG-CACHE-1 (CRITICAL): LRU/LFU/Random is_hit() inserted the item on every
-  miss regardless of update_stats flag. This meant CIC peek calls
-  (is_hit(paired_file, update_stats=False)) silently inserted paired_file
-  into the cache and triggered evictions, corrupting cache state and
-  inflating baseline hit rates.
-  FIX: Pure read-only check when update_stats=False; insert+evict only
-  when update_stats=True.
+  miss regardless of update_stats flag. CIC peek calls silently mutated cache.
+  FIX: Pure read-only when update_stats=False; insert+evict only on True.
 
-- BUG-CACHE-2 (MEDIUM): LFUCache.get_contents() and RandomCache.get_contents()
-  returned self.store directly (internal mutable set). Any caller that
-  iterated or modified the result would silently corrupt state.
-  FIX: return set(self.store) — a defensive copy.
+- BUG-CACHE-2 (MEDIUM): LFUCache.get_contents() / RandomCache.get_contents()
+  returned self.store directly (mutable internal set).
+  FIX: return set(self.store) — defensive copy.
+
+- BUG-DYN-1 (CRITICAL): LFUCache._evict_item() searched self.counter /
+  self.weighted_counter which may contain stale keys for files no longer
+  in self.store. min() picked a ghost key, store.discard() was a no-op,
+  new file was added on top -> silent cache overflow (len > capacity).
+  FIX: filter candidate dict to {k:v for k,v if k in self.store} before
+  calling min().
 
 Author: Cache-Aided NOMA Team
 Date: December 2025 | Revised: March 2026
@@ -22,15 +25,13 @@ Date: December 2025 | Revised: March 2026
 
 import random
 from collections import OrderedDict, Counter
-from typing import Set, Dict, Optional, List
+from typing import Set, Dict, Optional
 from .cache_base import CacheBase
 
 
 class LRUCache(CacheBase):
     """
     NOMA-Aware Least Recently Used (LRU) caching policy.
-
-    Evicts the least recently accessed item when cache is full.
     Uses OrderedDict for O(1) access and move-to-end operations.
     """
 
@@ -53,9 +54,8 @@ class LRUCache(CacheBase):
 
     def is_hit(self, item: int, update_stats: bool = True) -> bool:
         """
-        BUG-CACHE-1 FIX:
-        When update_stats=False this is a pure read-only check — no insert,
-        no eviction. Insert+evict only happen when update_stats=True.
+        BUG-CACHE-1 FIX: update_stats=False is a pure read-only peek.
+        No insert/evict happens unless update_stats=True.
         """
         if item in self.cache:
             if update_stats:
@@ -64,9 +64,7 @@ class LRUCache(CacheBase):
             return True
         else:
             if not update_stats:
-                # Pure peek — do NOT insert or evict
                 return False
-            # update_stats=True: insert and evict if needed
             if len(self.cache) >= self.capacity:
                 self._evict_item()
                 self._record_eviction()
@@ -76,15 +74,14 @@ class LRUCache(CacheBase):
 
     def _evict_item(self):
         if self.channel_aware_eviction and self.file_channel_scores:
+            # Evict from the LRU end (front of OrderedDict), highest channel gain
             num_candidates = max(1, len(self.cache) // 3)
             candidates = list(self.cache.keys())[:num_candidates]
             evict_file = max(
                 candidates,
-                key=lambda f: self.file_channel_scores.get(f, 1e-6),
-                default=None
+                key=lambda f: self.file_channel_scores.get(f, 1e-6)
             )
-            if evict_file:
-                del self.cache[evict_file]
+            del self.cache[evict_file]
         else:
             self.cache.popitem(last=False)
 
@@ -94,12 +91,10 @@ class LRUCache(CacheBase):
                 paired_file: Optional[int] = None) -> Dict:
         result = super().request(item, user_id, channel_gain, paired_user, paired_file)
         if channel_gain is not None:
-            if item in self.file_channel_scores:
-                self.file_channel_scores[item] = (
-                    0.9 * self.file_channel_scores[item] + 0.1 * channel_gain
-                )
-            else:
-                self.file_channel_scores[item] = channel_gain
+            self.file_channel_scores[item] = (
+                0.9 * self.file_channel_scores.get(item, channel_gain)
+                + 0.1 * channel_gain
+            )
         if result.get('weak_user_benefit') or result.get('strong_user_benefit'):
             self.file_cic_benefits[item] = self.file_cic_benefits.get(item, 0) + 1
         self.file_request_count[item] += 1
@@ -109,13 +104,13 @@ class LRUCache(CacheBase):
         return set(self.cache.keys())
 
     def get_cic_benefit_stats(self) -> Dict:
-        total_cic = sum(self.file_cic_benefits.values())
+        total = sum(self.file_cic_benefits.values())
         return {
-            'total_cic_benefits':   total_cic,
-            'files_providing_cic':  len(self.file_cic_benefits),
-            'avg_cic_per_file':     total_cic / len(self.file_cic_benefits) if self.file_cic_benefits else 0,
-            'top_cic_files':        sorted(self.file_cic_benefits.items(),
-                                           key=lambda x: x[1], reverse=True)[:10],
+            'total_cic_benefits':  total,
+            'files_providing_cic': len(self.file_cic_benefits),
+            'avg_cic_per_file':    total / len(self.file_cic_benefits) if self.file_cic_benefits else 0,
+            'top_cic_files':       sorted(self.file_cic_benefits.items(),
+                                          key=lambda x: x[1], reverse=True)[:10],
         }
 
     def clear(self):
@@ -129,6 +124,10 @@ class LRUCache(CacheBase):
 class LFUCache(CacheBase):
     """
     NOMA-Aware Least Frequently Used (LFU) caching policy.
+
+    BUG-DYN-1 FIX: _evict_item() now filters counter/weighted_counter
+    to only live keys (present in self.store) before calling min().
+    This prevents stale ghost keys from causing silent cache overflow.
     """
 
     def __init__(self, capacity: int, enable_noma_awareness: bool = True,
@@ -156,42 +155,54 @@ class LFUCache(CacheBase):
     def is_hit(self, item: int, update_stats: bool = True,
                channel_gain: Optional[float] = None) -> bool:
         """
-        BUG-CACHE-1 FIX:
-        When update_stats=False this is a pure read-only check — no insert,
-        no eviction. Insert+evict only happen when update_stats=True.
+        BUG-CACHE-1 FIX: update_stats=False is a pure read-only peek.
         """
         if item in self.store:
             if update_stats:
                 self.counter[item] += 1
                 if self.channel_weighted_frequency and channel_gain is not None:
-                    weight = 1.0 / (channel_gain + 1e-9)
-                    self.weighted_counter[item] += weight
+                    self.weighted_counter[item] += 1.0 / (channel_gain + 1e-9)
                 else:
                     self.weighted_counter[item] += 1.0
                 self._record_hit()
             return True
         else:
             if not update_stats:
-                # Pure peek — do NOT insert or evict
                 return False
-            # update_stats=True: insert and evict if needed
             if len(self.store) >= self.capacity:
                 self._evict_item()
                 self._record_eviction()
             self.store.add(item)
             self.counter[item] = 1
-            if self.channel_weighted_frequency and channel_gain is not None:
-                self.weighted_counter[item] = 1.0 / (channel_gain + 1e-9)
-            else:
-                self.weighted_counter[item] = 1.0
+            self.weighted_counter[item] = (
+                1.0 / (channel_gain + 1e-9)
+                if (self.channel_weighted_frequency and channel_gain is not None)
+                else 1.0
+            )
             self._record_miss()
             return False
 
     def _evict_item(self):
+        """
+        BUG-DYN-1 FIX: only consider keys that exist in self.store.
+        Stale keys in counter/weighted_counter (from prior episodes without
+        a full clear()) could cause min() to pick a ghost, making
+        store.discard() a no-op and growing len(store) beyond capacity.
+        """
         if self.channel_weighted_frequency and self.weighted_counter:
-            lfu_item = min(self.weighted_counter.items(), key=lambda x: x[1])[0]
+            live = {k: v for k, v in self.weighted_counter.items() if k in self.store}
+            if not live:
+                # Fallback: evict arbitrary element
+                lfu_item = next(iter(self.store))
+            else:
+                lfu_item = min(live, key=live.get)
         else:
-            lfu_item = min(self.counter.items(), key=lambda x: x[1])[0]
+            live = {k: v for k, v in self.counter.items() if k in self.store}
+            if not live:
+                lfu_item = next(iter(self.store))
+            else:
+                lfu_item = min(live, key=live.get)
+
         self.store.discard(lfu_item)
         self.counter.pop(lfu_item, None)
         self.weighted_counter.pop(lfu_item, None)
@@ -202,12 +213,12 @@ class LFUCache(CacheBase):
                 paired_file: Optional[int] = None) -> Dict:
         hit = self.is_hit(item, update_stats=True, channel_gain=channel_gain)
         result = {
-            'hit':                  hit,
-            'cic_enabled':          False,
-            'paired_user_cached':   False,
-            'weak_user_benefit':    False,
-            'strong_user_benefit':  False,
-            'cache_size':           len(self),
+            'hit':                 hit,
+            'cic_enabled':         False,
+            'paired_user_cached':  False,
+            'weak_user_benefit':   False,
+            'strong_user_benefit': False,
+            'cache_size':          len(self),
         }
         if not self.enable_noma_awareness:
             return result
@@ -216,21 +227,19 @@ class LFUCache(CacheBase):
             result['paired_user_cached'] = paired_cached
             if paired_cached:
                 result['weak_user_benefit'] = True
-                result['cic_enabled'] = True
-                self.cic_opportunities += 1
+                result['cic_enabled']       = True
+                self.cic_opportunities     += 1
                 self.file_cic_benefits[paired_file] = self.file_cic_benefits.get(paired_file, 0) + 1
             if hit:
                 result['strong_user_benefit'] = True
-                result['cic_enabled'] = True
-                self.noma_paired_hits += 1
-                self.file_cic_benefits[item] = self.file_cic_benefits.get(item, 0) + 1
+                result['cic_enabled']         = True
+                self.noma_paired_hits        += 1
+                self.file_cic_benefits[item]  = self.file_cic_benefits.get(item, 0) + 1
         if channel_gain is not None:
-            if item in self.file_channel_scores:
-                self.file_channel_scores[item] = (
-                    0.9 * self.file_channel_scores[item] + 0.1 * channel_gain
-                )
-            else:
-                self.file_channel_scores[item] = channel_gain
+            self.file_channel_scores[item] = (
+                0.9 * self.file_channel_scores.get(item, channel_gain)
+                + 0.1 * channel_gain
+            )
         if user_id is not None and channel_gain is not None:
             self.channel_gains[user_id] = channel_gain
         if user_id is not None and paired_user is not None:
@@ -238,15 +247,15 @@ class LFUCache(CacheBase):
         return result
 
     def get_contents(self) -> Set[int]:
-        """BUG-CACHE-2 FIX: return a defensive copy, not the internal set."""
+        """BUG-CACHE-2 FIX: defensive copy."""
         return set(self.store)
 
     def get_cic_benefit_stats(self) -> Dict:
-        total_cic = sum(self.file_cic_benefits.values())
+        total = sum(self.file_cic_benefits.values())
         return {
-            'total_cic_benefits':  total_cic,
+            'total_cic_benefits':  total,
             'files_providing_cic': len(self.file_cic_benefits),
-            'avg_cic_per_file':    total_cic / len(self.file_cic_benefits) if self.file_cic_benefits else 0,
+            'avg_cic_per_file':    total / len(self.file_cic_benefits) if self.file_cic_benefits else 0,
             'top_cic_files':       sorted(self.file_cic_benefits.items(),
                                           key=lambda x: x[1], reverse=True)[:10],
         }
@@ -281,9 +290,7 @@ class RandomCache(CacheBase):
 
     def is_hit(self, item: int, update_stats: bool = True) -> bool:
         """
-        BUG-CACHE-1 FIX:
-        When update_stats=False this is a pure read-only check — no insert,
-        no eviction. Insert+evict only happen when update_stats=True.
+        BUG-CACHE-1 FIX: update_stats=False is a pure read-only peek.
         """
         if item in self.store:
             if update_stats:
@@ -291,9 +298,7 @@ class RandomCache(CacheBase):
             return True
         else:
             if not update_stats:
-                # Pure peek — do NOT insert or evict
                 return False
-            # update_stats=True: insert and evict if needed
             if len(self.store) >= self.capacity:
                 self._evict_item()
                 self._record_eviction()
@@ -315,16 +320,14 @@ class RandomCache(CacheBase):
                 paired_file: Optional[int] = None) -> Dict:
         result = super().request(item, user_id, channel_gain, paired_user, paired_file)
         if channel_gain is not None:
-            if item in self.file_channel_scores:
-                self.file_channel_scores[item] = (
-                    0.9 * self.file_channel_scores[item] + 0.1 * channel_gain
-                )
-            else:
-                self.file_channel_scores[item] = channel_gain
+            self.file_channel_scores[item] = (
+                0.9 * self.file_channel_scores.get(item, channel_gain)
+                + 0.1 * channel_gain
+            )
         return result
 
     def get_contents(self) -> Set[int]:
-        """BUG-CACHE-2 FIX: return a defensive copy, not the internal set."""
+        """BUG-CACHE-2 FIX: defensive copy."""
         return set(self.store)
 
     def clear(self):
@@ -334,46 +337,53 @@ class RandomCache(CacheBase):
         self.reset_stats()
 
 
-if __name__ == "__main__":
-    print("=" * 70)
-    print("TESTING NOMA-AWARE DYNAMIC CACHING POLICIES")
-    print("=" * 70)
+if __name__ == '__main__':
+    print('=' * 70)
+    print('TESTING NOMA-AWARE DYNAMIC CACHING POLICIES')
+    print('=' * 70)
 
-    print("\n[TEST 1] LRU — is_hit(update_stats=False) must NOT insert")
+    print('\n[TEST 1] LRU peek must NOT insert')
     lru = LRUCache(capacity=3)
     lru.populate([1, 2, 3])
-    before = set(lru.get_contents())
-    lru.is_hit(99, update_stats=False)   # peek at non-existent file
-    after = set(lru.get_contents())
-    assert before == after, f"LRU cache mutated on peek! {before} -> {after}"
-    print(f"  PASS: cache unchanged after peek: {after}")
+    before = lru.get_contents()
+    lru.is_hit(99, update_stats=False)
+    assert before == lru.get_contents(), 'LRU mutated on peek!'
+    print(f'  PASS: {lru.get_contents()}')
 
-    print("\n[TEST 2] LFU — is_hit(update_stats=False) must NOT insert")
+    print('\n[TEST 2] LFU peek must NOT insert')
     lfu = LFUCache(capacity=3)
     lfu.populate([1, 2, 3])
     before = lfu.get_contents()
     lfu.is_hit(99, update_stats=False)
-    after = lfu.get_contents()
-    assert before == after, f"LFU cache mutated on peek! {before} -> {after}"
-    print(f"  PASS: cache unchanged after peek: {after}")
+    assert before == lfu.get_contents(), 'LFU mutated on peek!'
+    print(f'  PASS: {lfu.get_contents()}')
 
-    print("\n[TEST 3] Random — is_hit(update_stats=False) must NOT insert")
+    print('\n[TEST 3] LFU _evict_item stale-key safety (BUG-DYN-1)')
+    lfu2 = LFUCache(capacity=2, channel_weighted_frequency=True)
+    lfu2.store = {10, 20}
+    lfu2.counter = Counter({10: 5, 20: 3, 99: 100})  # 99 is stale
+    lfu2.weighted_counter = Counter({10: 5.0, 20: 3.0, 99: 999.0})  # ghost
+    lfu2._evict_item()
+    assert 99 not in lfu2.store, 'Ghost eviction!'
+    assert len(lfu2.store) == 1, f'Expected 1 item, got {len(lfu2.store)}'
+    print(f'  PASS: evicted live item, store={lfu2.store}')
+
+    print('\n[TEST 4] LFU get_contents() defensive copy')
+    lfu3 = LFUCache(capacity=3)
+    lfu3.populate([10, 20, 30])
+    c = lfu3.get_contents()
+    c.add(999)
+    assert 999 not in lfu3.store, 'Internal store corrupted!'
+    print(f'  PASS')
+
+    print('\n[TEST 5] Random peek must NOT insert')
     rnd = RandomCache(capacity=3)
     rnd.populate([1, 2, 3])
     before = rnd.get_contents()
     rnd.is_hit(99, update_stats=False)
-    after = rnd.get_contents()
-    assert before == after, f"Random cache mutated on peek! {before} -> {after}"
-    print(f"  PASS: cache unchanged after peek: {after}")
+    assert before == rnd.get_contents(), 'Random mutated on peek!'
+    print(f'  PASS: {rnd.get_contents()}')
 
-    print("\n[TEST 4] LFU get_contents() returns defensive copy")
-    lfu2 = LFUCache(capacity=3)
-    lfu2.populate([10, 20, 30])
-    contents = lfu2.get_contents()
-    contents.add(999)   # mutate the returned set
-    assert 999 not in lfu2.store, "LFU internal store was corrupted!"
-    print(f"  PASS: internal store unaffected")
-
-    print("\n" + "=" * 70)
-    print("ALL TESTS PASSED")
-    print("=" * 70)
+    print('\n' + '=' * 70)
+    print('ALL TESTS PASSED')
+    print('=' * 70)
