@@ -47,10 +47,12 @@ Bug Fix Log (2026 Audit):
   flags instead of partner-file flags. Swapped weak_cached/strong_cached.
 - BUG-CA-3 (HIGH): sum_rate used sic_results['sum_rate'] which ignored
   cache-rate overrides for partial hits. Recomputed as rate_weak+rate_strong.
-- BUG-CA-4 (MEDIUM): DQN cache was not reset between SNR points, or when
-  reset via clear(), it was never refilled (eval mode skips learning).
-  Fixed via _reset_dqn_for_eval(): clear() + request()-based warmup +
-  reset_stats().
+- BUG-CA-4 (CRITICAL, root-cause fix): DQN cache_hit = 0.0 at all SNR.
+  Previous attempt called request() in eval_mode=True; but _select_action()
+  and _execute_action() live INSIDE _learn_from_request(), which is
+  guarded by `if not self.eval_mode` — so no files were ever inserted.
+  Fix: temporarily set_eval_mode(False) during warmup so _execute_action
+  fires, then set_eval_mode(True) + reset_stats() before evaluation.
 
 
 Author: Cache-Aided NOMA Team
@@ -348,25 +350,32 @@ class CacheAidedNOMAAnalysis:
             cache.is_hit(int(file_id), update_stats=True)
 
     # -------------------------------------------------------------------------
-    # BUG-CA-4 FIX: reset + refill DQN cache between SNR points
+    # BUG-CA-4 FIX (root cause): reset + refill DQN cache between SNR points
     # -------------------------------------------------------------------------
 
     def _reset_dqn_for_eval(self, zipf_probs: np.ndarray, seed: int):
         """
         Reset and re-warm the DQN cache for a new SNR evaluation point.
 
-        BUG-CA-4 fix:
-            Between SNR points the DQN cache must be flushed to avoid
-            stale file residuals from the previous run. However, calling
-            clear() alone leaves the cache empty permanently because in
-            eval mode request() skips _learn_from_request() — but
-            _select_action() and _execute_action() still run, so the
-            cache DOES fill up when request() is called directly.
+        BUG-CA-4 root-cause fix:
+            _select_action() and _execute_action() are called exclusively
+            inside _learn_from_request(), which is guarded by:
 
-            Steps:
-              1. clear()         — flush stale contents
-              2. request() loop  — re-fill using trained policy inference
-              3. reset_stats()   — discard warmup hit/miss counters
+                if not self.eval_mode:
+                    self._learn_from_request(...)
+
+            So calling request() while eval_mode=True silently skips
+            ALL insertion logic — clear() empties the cache and it stays
+            empty forever, giving 0.0 cache hit rate.
+
+            Fix:
+              1. clear()               — flush stale contents
+              2. set_eval_mode(False)  — re-enable _execute_action path
+              3. request() loop        — fill cache via trained Q-network
+                                         (epsilon=0 in eval mode was saved,
+                                          so greedy policy is used)
+              4. set_eval_mode(True)   — restore no-learning / no-exploration
+              5. reset_stats()         — discard warmup hit/miss counters
         """
         cache = self.trained_dqn_cache
         if cache is None:
@@ -375,7 +384,13 @@ class CacheAidedNOMAAnalysis:
         # Step 1: flush stale files from the previous SNR point
         cache.clear()
 
-        # Step 2: refill via DQN inference (request() triggers _execute_action)
+        # Step 2: temporarily disable eval mode so _execute_action fires
+        cache.set_eval_mode(False)
+        # Force epsilon to 0 so the greedy trained policy is used,
+        # not the exploration epsilon that was active during training.
+        cache.epsilon = 0.0
+
+        # Step 3: refill via DQN inference
         rng = np.random.default_rng(seed)
         warmup_requests = rng.choice(
             self.cfg.NUM_FILES,
@@ -385,7 +400,10 @@ class CacheAidedNOMAAnalysis:
         for file_id in warmup_requests:
             cache.request(int(file_id))
 
-        # Step 3: clear warmup counters so evaluation stats start clean
+        # Step 4: re-engage eval mode (also sets epsilon=0 via set_eval_mode)
+        cache.set_eval_mode(True)
+
+        # Step 5: clear warmup counters so evaluation stats start clean
         cache.reset_stats()
 
     def setup_cache(self, policy: str, requests: np.ndarray = None,
