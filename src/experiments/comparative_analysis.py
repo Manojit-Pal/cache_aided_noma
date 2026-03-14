@@ -8,7 +8,9 @@ Bug Fix History (2026 Audit):
 - BUG-CA-1 (CRITICAL): LRU/LFU/Random caches never warmed up → 0.0 hit rate
 - BUG-CA-2 (CRITICAL): CIC flags used own-file instead of partner-file
 - BUG-CA-3 (HIGH):     sum_rate ignored cache-rate overrides for partial hits
-- BUG-CA-4 (MEDIUM):   DQN cache state bled across SNR evaluation points
+- BUG-CA-4 (MEDIUM):   DQN cache not properly reset+refilled between SNR points
+                        Revised: clear() followed by request()-based warmup
+                        so the trained policy actually fills the cache.
 
 Research References:
 - arXiv:1712.09557 (2018): "Cache-Aided Non-Orthogonal Multiple Access"
@@ -18,7 +20,7 @@ Research References:
 
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
-Version: 4.1 (2026 Bug-Fix Revision)
+Version: 4.2 (2026 Bug-Fix Revision 2)
 """
 
 import numpy as np
@@ -72,12 +74,6 @@ except ImportError:
 # ============================================================================
 
 def check_dqn_checkpoint() -> Optional[str]:
-    """
-    Check if trained DQN checkpoint exists.
-
-    Returns:
-        Path to checkpoint if exists, None otherwise
-    """
     checkpoint_path = 'models/dqn_cache/dqn_cache_final.pth'
     if os.path.exists(checkpoint_path):
         return checkpoint_path
@@ -88,23 +84,11 @@ def check_dqn_checkpoint() -> Optional[str]:
 
 
 def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
-    """
-    Automatically train DQN cache.
-
-    Args:
-        cfg: Configuration object
-        num_episodes: Number of training episodes
-
-    Returns:
-        Path to saved checkpoint or None if training failed
-    """
     if not HAS_DQN:
         print("❌ Error: DQN not available for training")
         return None
-
     try:
         from src.simulation.stable_dqn_sim import NOMADQNTrainer
-
         print("\n" + "#"*80)
         print("#" + " "*20 + "AUTO-TRAINING DQN CACHE" + " "*24 + "#")
         print("#"*80)
@@ -113,34 +97,25 @@ def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
         print(f"Episodes: {num_episodes}")
         print(f"\nResults will be saved to: models/dqn_cache/dqn_cache_final.pth")
         print(f"\nPress Ctrl+C to cancel and run without DQN.\n")
-
         response = input("Proceed with DQN training? [Y/n]: ").strip().lower()
         if response and response not in ['y', 'yes']:
             print("\n⚠️  Skipping DQN training. Will run comparison without DQN.")
             return None
-
         print("\n✅ Starting DQN training...\n")
-
         trainer = NOMADQNTrainer(cfg)
         trained_cache, train_history = trainer.train(
-            num_episodes=num_episodes,
-            test_interval=50,
-            save_best=True
+            num_episodes=num_episodes, test_interval=50, save_best=True
         )
-
         checkpoint_path = check_dqn_checkpoint()
         if checkpoint_path:
-            print(f"\n✅ DQN training complete!")
-            print(f"   Checkpoint saved: {checkpoint_path}")
+            print(f"\n✅ DQN training complete! Checkpoint: {checkpoint_path}")
             return checkpoint_path
         else:
             print(f"\n⚠️  Training completed but checkpoint not found.")
             return None
-
     except KeyboardInterrupt:
         print("\n\n⚠️  Training cancelled by user.")
         return None
-
     except Exception as e:
         print(f"\n❌ Error during DQN training: {e}")
         import traceback
@@ -149,19 +124,8 @@ def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
 
 
 def load_trained_dqn(checkpoint_path: str, cfg) -> Optional[object]:
-    """
-    Load trained DQN cache from checkpoint.
-
-    Args:
-        checkpoint_path: Path to .pth checkpoint
-        cfg: Configuration object
-
-    Returns:
-        Loaded DQN cache or None if loading failed
-    """
     if not HAS_DQN:
         return None
-
     try:
         cache = DQNCache(
             capacity=cfg.CACHE_SIZE,
@@ -205,7 +169,6 @@ class CacheAidedNOMAAnalysis:
         print(f"\n✅ CacheAidedNOMAAnalysis initialized")
         print(f"   SNR range: {self.snr_db_range[0]} to {self.snr_db_range[-1]} dB")
         print(f"   Realizations: {self.num_realizations}")
-
         policies_list = ['TopK', 'LRU', 'LFU', 'Random', 'NO-CACHE']
         if trained_dqn_cache is not None:
             policies_list.append('DQN (trained)')
@@ -219,8 +182,7 @@ class CacheAidedNOMAAnalysis:
 
     def compute_jains_fairness(self, rates: List[float]) -> float:
         """
-        Compute Jain's Fairness Index.
-        J = (sum(r_i))^2 / (n * sum(r_i^2)),  range [1/n, 1]
+        Jain's Fairness Index: J = (sum r_i)^2 / (n * sum r_i^2), range [1/n, 1]
         """
         rates = np.array(rates)
         n = len(rates)
@@ -228,59 +190,103 @@ class CacheAidedNOMAAnalysis:
             return 0.0
         return (rates.sum() ** 2) / (n * (rates ** 2).sum())
 
-    # ========================================================================
-    # BUG-CA-1 FIX: Cache Warmup Helper
-    # ========================================================================
+    # =========================================================================
+    # BUG-CA-1 FIX: Dynamic cache warmup (LRU / LFU / Random)
+    # =========================================================================
 
     def _warmup_cache(self, cache, zipf_probs: np.ndarray, seed: int):
         """
-        Warm up a dynamic cache (LRU / LFU / Random) by replaying a
-        representative stream of Zipf-distributed requests.
+        Warm up a dynamic cache (LRU / LFU / Random) before evaluation.
 
         BUG-CA-1 fix:
-            Previously LRU/LFU/Random caches were queried with
-            update_stats=False, so nothing ever entered them and
-            is_hit() always returned False (0.0 hit rate).
+            Fresh empty LRU/LFU/Random caches were checked via
+            is_hit(update_stats=False) so nothing ever entered them
+            and hit rate was always 0.0.
 
-            We feed CACHE_SIZE * 10 requests (enough to fill the cache
-            and establish a stable access-frequency distribution) using
-            is_hit(update_stats=True), which lets LRU/LFU track recency
-            and frequency and evict/admit as designed.
+            We feed CACHE_SIZE * 10 Zipf-sampled requests through
+            is_hit(update_stats=True) so LRU/LFU track recency and
+            frequency and the cache fills up to capacity before eval.
 
-        StaticTopKCache and NO-CACHE (None) are skipped.
-        DQN cache is also skipped (its warmup is handled by training).
+        StaticTopKCache and DQNCache are handled separately and skipped here.
         """
         if cache is None:
             return
-        if isinstance(cache, (StaticTopKCache,)):
+        if isinstance(cache, StaticTopKCache):
             return
         if HAS_DQN and isinstance(cache, DQNCache):
             return
 
         rng = np.random.default_rng(seed)
-        warmup_size = self.cfg.CACHE_SIZE * 10
         warmup_requests = rng.choice(
             self.cfg.NUM_FILES,
-            size=warmup_size,
+            size=self.cfg.CACHE_SIZE * 10,
             p=zipf_probs
         )
         for file_id in warmup_requests:
             cache.is_hit(int(file_id), update_stats=True)
+
+    # =========================================================================
+    # BUG-CA-4 FIX (REVISED): DQN reset + refill via request()
+    # =========================================================================
+
+    def _reset_dqn_for_eval(self, zipf_probs: np.ndarray, seed: int):
+        """
+        Reset and re-warm the DQN cache for a new SNR evaluation point.
+
+        BUG-CA-4 fix (revised):
+            The earlier fix called clear() alone, which flushed all cached
+            files. In eval mode the DQN never calls _learn_from_request(),
+            so _execute_action() is never triggered and the cache stayed
+            empty for all subsequent SNR points -> 0.0 hit rate.
+
+            Correct approach:
+              1. clear() flushes stale contents from the previous SNR run.
+              2. Re-warm via request() (NOT is_hit()) for CACHE_SIZE * 10
+                 Zipf-sampled file IDs. In eval mode, request() skips
+                 learning but still calls _select_action() which calls
+                 _execute_action(), so the trained DQN policy makes real
+                 eviction/admission decisions and fills the cache.
+              3. reset_stats() clears hit/miss counters accumulated during
+                 warmup so the evaluation starts with clean statistics.
+
+        Why request() and not is_hit():
+            is_hit() only checks membership; it never inserts files.
+            request() triggers the full DQN inference pipeline including
+            action selection and cache insertion (_execute_action).
+        """
+        cache = self.trained_dqn_cache
+        if cache is None:
+            return
+
+        # Step 1: flush stale cached files from the previous SNR point
+        cache.clear()
+
+        # Step 2: re-warm using the trained policy's inference path
+        rng = np.random.default_rng(seed)
+        warmup_requests = rng.choice(
+            self.cfg.NUM_FILES,
+            size=self.cfg.CACHE_SIZE * 10,
+            p=zipf_probs
+        )
+        for file_id in warmup_requests:
+            # request() in eval mode: no gradient update, but
+            # _select_action() + _execute_action() DO run -> cache fills up
+            cache.request(int(file_id))
+
+        # Step 3: clear warmup statistics so eval counters start at 0
+        cache.reset_stats()
+
+    # =========================================================================
+    # CACHE SETUP
+    # =========================================================================
 
     def setup_cache(self, policy: str, requests: np.ndarray = None,
                     warmup_seed: int = 0, zipf_probs: np.ndarray = None):
         """
         Create and warm up a cache instance for the given policy.
 
-        BUG-CA-1 fix:
-            _warmup_cache() is now called for every dynamic policy
-            (LRU, LFU, Random) so the cache is populated before
-            the Monte Carlo evaluation loop begins.
-
-        BUG-CA-4 fix:
-            DQN cache is flushed (clear()) between SNR evaluations so
-            eviction history from one SNR point does not contaminate
-            the next. Model weights are NOT reset.
+        BUG-CA-1 fix: _warmup_cache() populates LRU/LFU/Random.
+        BUG-CA-4 fix: _reset_dqn_for_eval() flushes and re-warms DQN.
         """
         if policy is None or policy == 'none':
             return None
@@ -289,17 +295,16 @@ class CacheAidedNOMAAnalysis:
             if self.trained_dqn_cache is None:
                 print("⚠️  Warning: DQN requested but no trained cache available")
                 return None
-            # BUG-CA-4 FIX: flush contents so each SNR starts clean.
-            # clear() resets stored files only; model weights are intact.
-            self.trained_dqn_cache.clear()
+            # BUG-CA-4 REVISED FIX: flush + request()-based warmup
+            if zipf_probs is not None:
+                self._reset_dqn_for_eval(zipf_probs, seed=warmup_seed)
             return self.trained_dqn_cache
 
         # Non-DQN caches
         cache = create_cache(policy, capacity=self.cfg.CACHE_SIZE)
 
-        # Populate static caches
         if isinstance(cache, StaticTopKCache) and requests is not None:
-            cnt = Counter(requests)
+            cnt     = Counter(requests)
             ranking = [item for item, _ in cnt.most_common()]
             cache.populate(ranking)
         elif zipf_probs is not None:
@@ -308,17 +313,19 @@ class CacheAidedNOMAAnalysis:
 
         return cache
 
-    def generate_user_pair_channels(self, snr_db: float, seed: int = None) -> Tuple:
-        """Generate channel gains for weak-strong user pair."""
+    # =========================================================================
+    # CHANNEL GENERATION
+    # =========================================================================
+
+    def generate_user_pair_channels(self, snr_db: float,
+                                    seed: int = None) -> Tuple:
+        """Generate channel gains for a weak-strong user pair."""
         if seed is not None:
             set_seed(seed)
 
         positions = generate_user_positions(
-            num_users=2,
-            cell_radius=self.cfg.CELL_RADIUS,
-            seed=seed
+            num_users=2, cell_radius=self.cfg.CELL_RADIUS, seed=seed
         )
-
         channel_gains = compute_channel_gains(
             positions,
             exponent=self.cfg.PATHLOSS_EXPONENT,
@@ -326,41 +333,36 @@ class CacheAidedNOMAAnalysis:
             K_factor_db=self.cfg.RICIAN_K_FACTOR_DB,
             los_probability=self.cfg.LOS_PROBABILITY
         )
-
         gain_weak   = np.min(channel_gains)
         gain_strong = np.max(channel_gains)
-
         gain_avg    = np.mean(channel_gains)
         noise_power = self.cfg.TX_POWER * gain_avg / self.db_to_linear(snr_db)
-
         return gain_weak, gain_strong, noise_power
+
+    # =========================================================================
+    # NOMA TRANSMISSION SIMULATION
+    # =========================================================================
 
     def simulate_noma_transmission(
         self,
-        gain_weak: float, gain_strong: float,
-        noise_power: float,
-        cache=None,
-        file_weak: int = 0, file_strong: int = 1
+        gain_weak: float, gain_strong: float, noise_power: float,
+        cache=None, file_weak: int = 0, file_strong: int = 1
     ) -> Dict:
         """
         Simulate one NOMA transmission with optional cache assistance.
 
         BUG-CA-2 FIX:
-            Previously simulate_sic_process() received
-                weak_cached   = cache_hit_weak   (own file)
-                strong_cached = cache_hit_strong (own file)
-            CIC works by cancelling interference using the PARTNER's
-            cached file, not one's own. Corrected to:
-                weak_cached   = cache_hit_strong  (partner file)
-                strong_cached = cache_hit_weak    (partner file)
+            simulate_sic_process() now receives PARTNER file cache status:
+                weak_cached   = cache_hit_strong  (strong's file cached)
+                strong_cached = cache_hit_weak    (weak's file cached)
+            Previously used own-file flags, which is physically wrong.
 
         BUG-CA-3 FIX:
-            sum_rate is now computed as rate_weak + rate_strong AFTER
-            the cache-rate overrides, so partial cache hits are
-            correctly reflected in sum_rate.
+            sum_rate = rate_weak + rate_strong (after cache-rate overrides).
+            Previously used sic_results['sum_rate'] which ignored overrides.
         """
         # ------------------------------------------------------------------
-        # 1. Check cache status (own-file hits for delivery decisions)
+        # 1. Cache status (own-file delivery checks)
         # ------------------------------------------------------------------
         if cache is not None:
             cache_hit_weak   = cache.is_hit(file_weak,   update_stats=False)
@@ -372,30 +374,30 @@ class CacheAidedNOMAAnalysis:
         cache_rate = getattr(self.cfg, 'CACHE_DELIVERY_RATE', self.cfg.TARGET_RATE_BPS)
 
         # ------------------------------------------------------------------
-        # 2. Both users cached — no NOMA transmission needed
+        # 2. Both cached: no NOMA transmission
         # ------------------------------------------------------------------
         if cache_hit_weak and cache_hit_strong:
             return {
-                'sinr_weak':            np.inf,
-                'sinr_strong':          np.inf,
-                'rate_weak':            cache_rate,
-                'rate_strong':          cache_rate,
-                'sum_rate':             2 * cache_rate,
-                'outage_weak':          0,
-                'outage_strong':        0,
-                'ber_weak':             0.0,
-                'ber_strong':           0.0,
-                'cache_hit_weak':       1,
-                'cache_hit_strong':     1,
-                'transmission_needed':  0,
-                'sic_success':          1,
-                'cic_opportunity':      0,
-                'cic_benefit':          0,
-                'energy':               0.0,
+                'sinr_weak':           np.inf,
+                'sinr_strong':         np.inf,
+                'rate_weak':           cache_rate,
+                'rate_strong':         cache_rate,
+                'sum_rate':            2 * cache_rate,
+                'outage_weak':         0,
+                'outage_strong':       0,
+                'ber_weak':            0.0,
+                'ber_strong':          0.0,
+                'cache_hit_weak':      1,
+                'cache_hit_strong':    1,
+                'transmission_needed': 0,
+                'sic_success':         1,
+                'cic_opportunity':     0,
+                'cic_benefit':         0,
+                'energy':              0.0,
             }
 
         # ------------------------------------------------------------------
-        # 3. Power Allocation
+        # 3. Power allocation
         # ------------------------------------------------------------------
         p_weak, p_strong, feasible, alloc_info = allocate_power(
             gain_w=gain_weak,
@@ -410,11 +412,8 @@ class CacheAidedNOMAAnalysis:
         sinr_threshold = sinr_threshold_from_rate(self.cfg.TARGET_RATE_BPS)
 
         # ------------------------------------------------------------------
-        # 4. SIC / CIC Simulation
-        #
-        # BUG-CA-2 FIX: pass PARTNER's cache status, not own.
-        #   weak user benefits from CIC when STRONG user's file is cached.
-        #   strong user benefits when WEAK user's file is cached.
+        # 4. SIC/CIC simulation
+        #    BUG-CA-2 FIX: pass PARTNER cache status, not own.
         # ------------------------------------------------------------------
         sic_results = simulate_sic_process(
             P_tx=self.cfg.TX_POWER,
@@ -433,17 +432,16 @@ class CacheAidedNOMAAnalysis:
         strong_success = sic_results['strong_success']
 
         # ------------------------------------------------------------------
-        # 5. Rate computation (override for cache hits)
+        # 5. Rates (override for cache hits)
         # ------------------------------------------------------------------
         rate_weak   = cache_rate if cache_hit_weak   else (sic_results['rate_w'] if weak_success   else 0.0)
         rate_strong = cache_rate if cache_hit_strong else (sic_results['rate_s'] if strong_success else 0.0)
 
-        # BUG-CA-3 FIX: derive sum_rate from the overridden rates,
-        # not from sic_results['sum_rate'] which ignores cache_rate.
+        # BUG-CA-3 FIX: recompute sum_rate from overridden rates
         sum_rate = rate_weak + rate_strong
 
         # ------------------------------------------------------------------
-        # 6. Outage detection
+        # 6. Outage
         # ------------------------------------------------------------------
         outage_weak   = 0 if (cache_hit_weak   or weak_success)   else 1
         outage_strong = 0 if (cache_hit_strong or strong_success) else 1
@@ -462,15 +460,11 @@ class CacheAidedNOMAAnalysis:
         # ------------------------------------------------------------------
         cic_opportunity = 0
         cic_benefit     = 0
-
         if cache_hit_strong and not cache_hit_weak:
-            # Weak user can cancel strong's interference via CIC
             cic_opportunity += 1
             if weak_success:
                 cic_benefit += 1
-
         if cache_hit_weak and not cache_hit_strong:
-            # Strong user can cancel weak's interference via CIC
             cic_opportunity += 1
             if strong_success:
                 cic_benefit += 1
@@ -499,29 +493,31 @@ class CacheAidedNOMAAnalysis:
             'energy':              energy,
         }
 
+    # =========================================================================
+    # SINGLE SNR POINT
+    # =========================================================================
+
     def run_single_snr(self, snr_db: float, policy: str = 'topk',
                        seed_offset: int = 0) -> Dict:
         """
         Run Monte Carlo simulations for a single SNR point.
 
         BUG-CA-1 / BUG-CA-4 fix:
-            setup_cache() now receives zipf_probs and a warmup seed so
-            dynamic caches are pre-populated before the eval loop.
-            DQN cache is flushed (clear()) to prevent cross-SNR contamination.
+            setup_cache() receives zipf_probs and warmup_seed.
+            - Dynamic caches (LRU/LFU/Random): filled via is_hit() warmup.
+            - DQN cache: flushed then re-filled via request() warmup.
         """
-        # Zipf probability distribution (shared by warmup + evaluation)
-        ranks       = np.arange(1, self.cfg.NUM_FILES + 1)
+        # Zipf distribution (shared by warmup and evaluation)
+        ranks        = np.arange(1, self.cfg.NUM_FILES + 1)
         zipf_weights = 1.0 / np.power(ranks, self.cfg.ZIPF_ALPHA)
-        zipf_probs  = zipf_weights / zipf_weights.sum()
+        zipf_probs   = zipf_weights / zipf_weights.sum()
 
-        # Generate file requests for static-cache (TopK) population
+        # Static-cache population requests
         requests = sample_zipf_catalog(
-            self.cfg.NUM_FILES,
-            self.cfg.ZIPF_ALPHA,
+            self.cfg.NUM_FILES, self.cfg.ZIPF_ALPHA,
             size=self.cfg.NUM_USERS * self.cfg.REQUESTS_PER_USER
         )
 
-        # Setup + warm up cache (BUG-CA-1 + BUG-CA-4 fixes inside)
         warmup_seed = self.cfg.RANDOM_SEED + seed_offset
         cache = self.setup_cache(
             policy, requests,
@@ -529,16 +525,14 @@ class CacheAidedNOMAAnalysis:
             zipf_probs=zipf_probs
         )
 
-        # Storage for per-realization metrics
         metrics = defaultdict(list)
 
-        # Monte Carlo simulations
         for i in range(self.num_realizations):
             seed = self.cfg.RANDOM_SEED + seed_offset + i
+            gain_weak, gain_strong, noise_power = \
+                self.generate_user_pair_channels(snr_db, seed)
 
-            gain_weak, gain_strong, noise_power = self.generate_user_pair_channels(snr_db, seed)
-
-            rng = np.random.default_rng(seed)
+            rng         = np.random.default_rng(seed)
             file_weak   = int(rng.choice(self.cfg.NUM_FILES, p=zipf_probs))
             file_strong = int(rng.choice(self.cfg.NUM_FILES, p=zipf_probs))
 
@@ -546,13 +540,12 @@ class CacheAidedNOMAAnalysis:
                 gain_weak, gain_strong, noise_power,
                 cache, file_weak, file_strong
             )
-
             for key, value in result.items():
                 metrics[key].append(value)
 
         # Aggregate statistics
         def compute_stats(arr):
-            arr = np.array(arr, dtype=float)
+            arr  = np.array(arr, dtype=float)
             mean = arr.mean()
             std  = arr.std(ddof=1)
             sem  = std / np.sqrt(len(arr))
@@ -560,14 +553,12 @@ class CacheAidedNOMAAnalysis:
             return mean, std, sem, ci95
 
         aggregated = {'snr_db': snr_db, 'policy': policy}
-
-        for key in metrics.keys():
+        for key in metrics:
             mean, std, sem, ci = compute_stats(metrics[key])
-            aggregated[f'{key}_mean']  = mean
-            aggregated[f'{key}_std']   = std
-            aggregated[f'{key}_ci95']  = ci
+            aggregated[f'{key}_mean'] = mean
+            aggregated[f'{key}_std']  = std
+            aggregated[f'{key}_ci95'] = ci
 
-        # Derived metrics
         aggregated['outage_probability'] = (
             (aggregated['outage_weak_mean'] + aggregated['outage_strong_mean']) / 2
         )
@@ -580,19 +571,22 @@ class CacheAidedNOMAAnalysis:
             / max(aggregated['cic_opportunity_mean'], 1e-9)
         )
 
-        # Fairness (Jain's index per realization)
         fairness_values = [
-            self.compute_jains_fairness([metrics['rate_weak'][i], metrics['rate_strong'][i]])
+            self.compute_jains_fairness([metrics['rate_weak'][i],
+                                         metrics['rate_strong'][i]])
             for i in range(self.num_realizations)
         ]
         aggregated['fairness_mean'] = np.mean(fairness_values)
 
-        # Energy efficiency
         total_energy = aggregated['energy_mean'] * self.num_realizations
         total_bits   = aggregated['sum_rate_mean'] * self.num_realizations
         aggregated['energy_efficiency'] = total_bits / max(total_energy, 1e-12)
 
         return aggregated
+
+    # =========================================================================
+    # FULL COMPARISON
+    # =========================================================================
 
     def run_full_comparison(self, policies: List[str] = None) -> pd.DataFrame:
         """Run comprehensive comparison across all SNR points."""
@@ -605,50 +599,36 @@ class CacheAidedNOMAAnalysis:
         print("RUNNING COMPREHENSIVE COMPARISON")
         print(f"{'='*70}")
 
-        policy_names = []
-        for p in policies:
-            if p == 'none':  policy_names.append('NO-CACHE')
-            elif p == 'dqn': policy_names.append('DQN (trained)')
-            else:            policy_names.append(p.upper())
+        def pname(p):
+            if p == 'none': return 'NO-CACHE'
+            if p == 'dqn':  return 'DQN (trained)'
+            return p.upper()
 
-        print(f"Policies: {', '.join(policy_names)}")
+        print(f"Policies: {', '.join(pname(p) for p in policies)}")
         print(f"SNR range: {self.snr_db_range[0]} to {self.snr_db_range[-1]} dB")
         print(f"Monte Carlo runs per point: {self.num_realizations}\n")
 
         all_results = []
-
         for policy in policies:
-            policy_name = (
-                'DQN (trained)' if policy == 'dqn'
-                else 'NO-CACHE' if policy == 'none'
-                else policy.upper()
-            )
-            print(f"\nProcessing {policy_name} policy...")
-
+            print(f"\nProcessing {pname(policy)} policy...")
             for idx, snr_db in enumerate(self.snr_db_range):
-                print(f"  SNR = {snr_db:+3d} dB ({idx+1}/{len(self.snr_db_range)})", end='\r')
-
+                print(f"  SNR = {snr_db:+3d} dB ({idx+1}/{len(self.snr_db_range)})",
+                      end='\r')
                 result = self.run_single_snr(
-                    snr_db,
-                    policy=policy,
-                    seed_offset=idx * 10000
+                    snr_db, policy=policy, seed_offset=idx * 10000
                 )
                 all_results.append(result)
-
-            print(f"  ✅ {policy_name} completed" + " "*30)
+            print(f"  ✅ {pname(policy)} completed" + " "*30)
 
         df = pd.DataFrame(all_results)
-
         print(f"\n{'='*70}")
-        print(f"✅ COMPARISON COMPLETE")
-        print(f"   Total data points: {len(df)}")
+        print(f"✅ COMPARISON COMPLETE — {len(df)} data points")
         print(f"{'='*70}\n")
-
         return df
 
-    # ========================================================================
+    # =========================================================================
     # VISUALIZATION
-    # ========================================================================
+    # =========================================================================
 
     def plot_main_comparison(self, df: pd.DataFrame, save_path: str = None):
         """Create comprehensive 9-subplot comparison."""
@@ -657,56 +637,33 @@ class CacheAidedNOMAAnalysis:
             'Cache-Aided NOMA vs Traditional NOMA: Comprehensive Analysis',
             fontsize=18, fontweight='bold', y=0.995
         )
-
         policies = df['policy'].unique()
 
-        policy_colors = {
-            'topk':   '#1f77b4',
-            'lru':    '#2ca02c',
-            'lfu':    '#9467bd',
-            'random': '#ff7f0e',
-            'none':   '#FFD700',
-            'dqn':    '#00CED1',
-        }
-        policy_markers = {
-            'topk': 'o', 'lru': 's', 'lfu': '^',
-            'random': 'D', 'none': 'P', 'dqn': '*',
-        }
+        policy_colors  = {'topk': '#1f77b4', 'lru': '#2ca02c', 'lfu': '#9467bd',
+                          'random': '#ff7f0e', 'none': '#FFD700', 'dqn': '#00CED1'}
+        policy_markers = {'topk': 'o', 'lru': 's', 'lfu': '^',
+                          'random': 'D', 'none': 'P', 'dqn': '*'}
 
-        def get_linewidth(policy): return 3.0 if policy == 'none' else 2.5 if policy == 'dqn' else 2.0
-        def get_label(policy):
-            if policy == 'none': return 'NO-CACHE'
-            if policy == 'dqn':  return 'DQN (trained)'
-            return policy.upper()
+        def lw(p):  return 3.0 if p == 'none' else 2.5 if p == 'dqn' else 2.0
+        def lbl(p): return 'NO-CACHE' if p == 'none' else 'DQN (trained)' if p == 'dqn' else p.upper()
 
         def plot_metric(ax, metric, title, ylabel, log_scale=False):
-            for policy in policies:
-                data  = df[df['policy'] == policy]
-                label = get_label(policy)
+            for p in policies:
+                d = df[df['policy'] == p]
+                kw = dict(marker=policy_markers.get(p, 'o'), label=lbl(p),
+                          color=policy_colors.get(p, 'gray'),
+                          linewidth=lw(p), markersize=6)
                 if log_scale:
-                    ax.semilogy(
-                        data['snr_db'], data[metric],
-                        marker=policy_markers.get(policy, 'o'),
-                        label=label,
-                        color=policy_colors.get(policy, 'gray'),
-                        linewidth=get_linewidth(policy), markersize=6
-                    )
+                    ax.semilogy(d['snr_db'], d[metric], **kw)
                 else:
-                    ax.plot(
-                        data['snr_db'], data[metric],
-                        marker=policy_markers.get(policy, 'o'),
-                        label=label,
-                        color=policy_colors.get(policy, 'gray'),
-                        linewidth=get_linewidth(policy), markersize=6
-                    )
+                    ax.plot(d['snr_db'], d[metric], **kw)
                     ci_key = metric.replace('_mean', '_ci95')
-                    if ci_key in data.columns:
-                        ax.fill_between(
-                            data['snr_db'],
-                            data[metric] - data[ci_key],
-                            data[metric] + data[ci_key],
-                            alpha=0.15, color=policy_colors.get(policy, 'gray')
-                        )
+                    if ci_key in d.columns:
+                        ax.fill_between(d['snr_db'],
+                                        d[metric] - d[ci_key],
+                                        d[metric] + d[ci_key],
+                                        alpha=0.15,
+                                        color=policy_colors.get(p, 'gray'))
             ax.set_xlabel('SNR (dB)', fontsize=11)
             ax.set_ylabel(ylabel, fontsize=11)
             ax.set_title(title, fontsize=12, fontweight='bold')
@@ -721,23 +678,16 @@ class CacheAidedNOMAAnalysis:
                     'Outage Probability', log_scale=True)
 
         ax3 = plt.subplot(3, 3, 3)
-        for policy in policies:
-            if policy == 'none':
-                continue
-            data  = df[df['policy'] == policy]
-            label = get_label(policy)
-            ax3.plot(
-                data['snr_db'], data['cache_hit_rate'],
-                marker=policy_markers.get(policy, '^'),
-                label=label,
-                color=policy_colors.get(policy, 'gray'),
-                linewidth=2.0, markersize=6
-            )
+        for p in policies:
+            if p == 'none': continue
+            d = df[df['policy'] == p]
+            ax3.plot(d['snr_db'], d['cache_hit_rate'],
+                     marker=policy_markers.get(p, '^'), label=lbl(p),
+                     color=policy_colors.get(p, 'gray'), linewidth=2.0, markersize=6)
         ax3.set_xlabel('SNR (dB)', fontsize=11)
         ax3.set_ylabel('Cache Hit Rate', fontsize=11)
         ax3.set_title('Cache Hit Rate vs SNR', fontsize=12, fontweight='bold')
-        ax3.grid(True, alpha=0.3)
-        ax3.legend(fontsize=9, loc='best')
+        ax3.grid(True, alpha=0.3); ax3.legend(fontsize=9, loc='best')
 
         ax4 = plt.subplot(3, 3, 4)
         plot_metric(ax4, 'rate_weak_mean', 'Weak User Rate vs SNR', 'Rate (bps/Hz)')
@@ -759,13 +709,16 @@ class CacheAidedNOMAAnalysis:
                     'Energy Efficiency (bits/J)')
 
         plt.tight_layout(rect=[0, 0, 1, 0.99])
-
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"✅ Saved: {save_path}")
         else:
             plt.show()
         plt.close()
+
+    # =========================================================================
+    # SAVE RESULTS
+    # =========================================================================
 
     def save_results(self, df: pd.DataFrame, save_dir: str = 'results'):
         """Save results to CSV and generate summary."""
@@ -781,29 +734,23 @@ class CacheAidedNOMAAnalysis:
                 f.write("="*70 + "\n")
                 f.write("CACHE-AIDED NOMA COMPARATIVE ANALYSIS SUMMARY\n")
                 f.write("="*70 + "\n\n")
-
                 high_snr      = df['snr_db'].max()
                 high_snr_data = df[df['snr_db'] == high_snr]
-
                 f.write(f"Performance at SNR = {high_snr} dB:\n")
                 f.write("-"*70 + "\n\n")
-
                 for policy in high_snr_data['policy'].unique():
-                    policy_data = high_snr_data[high_snr_data['policy'] == policy]
-                    if len(policy_data) == 0:
-                        continue
-                    row = policy_data.iloc[0]
-                    if policy == 'none':  policy_name = 'NO-CACHE'
-                    elif policy == 'dqn': policy_name = 'DQN (trained)'
-                    else:                 policy_name = policy.upper()
-
-                    f.write(f"{policy_name}:\n")
+                    pdata = high_snr_data[high_snr_data['policy'] == policy]
+                    if len(pdata) == 0: continue
+                    row  = pdata.iloc[0]
+                    name = ('NO-CACHE'      if policy == 'none'
+                            else 'DQN (trained)' if policy == 'dqn'
+                            else policy.upper())
+                    f.write(f"{name}:\n")
                     f.write(f"  Sum-Rate: {row['sum_rate_mean']:.4f} bps/Hz\n")
                     f.write(f"  Outage Prob: {row['outage_probability']:.6f}\n")
                     f.write(f"  Cache Hit Rate: {row.get('cache_hit_rate', 0.0):.4f}\n")
                     f.write(f"  Fairness: {row['fairness_mean']:.4f}\n")
                     f.write(f"  Energy Efficiency: {row['energy_efficiency']:.2f} bits/J\n\n")
-
                 f.write("="*70 + "\n")
             print(f"✅ Saved: {summary_path}")
         except Exception as e:
@@ -815,23 +762,14 @@ class CacheAidedNOMAAnalysis:
 # ============================================================================
 
 def main():
-    """
-    Run comprehensive comparative analysis with automatic DQN training.
-    """
     print("\n" + "#"*80)
     print("#" + " "*10 + "CACHE-AIDED NOMA COMPARATIVE ANALYSIS" + " "*12 + "#")
     print("#" + " "*15 + "(with Auto-Training DQN)" + " "*20 + "#")
     print("#"*80 + "\n")
 
-    # ========================================================================
-    # STEP 1: Check for trained DQN
-    # ========================================================================
-
     trained_dqn_cache = None
-
     if HAS_DQN:
         checkpoint_path = check_dqn_checkpoint()
-
         if checkpoint_path:
             print(f"✅ Found trained DQN checkpoint: {checkpoint_path}")
             trained_dqn_cache = load_trained_dqn(checkpoint_path, cfg)
@@ -844,10 +782,6 @@ def main():
                 trained_dqn_cache = load_trained_dqn(checkpoint_path, cfg)
             else:
                 print("\n⚠️  Proceeding without DQN policy.\n")
-
-    # ========================================================================
-    # STEP 2: Run comprehensive comparison
-    # ========================================================================
 
     analyzer = CacheAidedNOMAAnalysis(
         cfg,
@@ -862,16 +796,10 @@ def main():
 
     df = analyzer.run_full_comparison(policies=policies)
 
-    # ========================================================================
-    # STEP 3: Save results and plots
-    # ========================================================================
-
     os.makedirs('results', exist_ok=True)
     analyzer.save_results(df, save_dir='results')
-
     analyzer.plot_main_comparison(
-        df,
-        save_path='results/cache_aided_vs_traditional_noma.png'
+        df, save_path='results/cache_aided_vs_traditional_noma.png'
     )
 
     print("\n" + "#"*80)
@@ -887,10 +815,8 @@ def main():
     print("  • results/cache_aided_vs_traditional_noma.png")
     print("  • results/comparative_analysis_results.csv")
     print("  • results/performance_summary.txt")
-
     if trained_dqn_cache is not None:
-        print("  • models/dqn_cache/dqn_cache_final.pth (DQN checkpoint)")
-
+        print("  • models/dqn_cache/dqn_cache_final.pth")
     print("\n")
 
 
