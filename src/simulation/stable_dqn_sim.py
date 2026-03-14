@@ -16,6 +16,8 @@ Bug Fix History (2026 Audit):
 - BUG-C (HIGH):       _test_cache() phase='test' -> DQN fell into baseline path
 - BUG-D (MEDIUM):     episode_done=True could never fire when users had 0 requests
 - BUG-E (LOW):        outage_probability denominator mismatch between episode paths
+- LOW-1 (LOW):        DQN miss path never incremented cache_misses directly
+                      -> miss_rate silently underreported in all DQN episodes
 """
 
 import numpy as np
@@ -136,6 +138,8 @@ class NOMADQNTrainer:
     # BUG-A FIX: peek with is_hit(update_stats=False) to set miss_for_noma;
     #            cache.request() remains the single authoritative call.
     # BUG-D FIX: episode_done derived from flat request index, not per-user.
+    # LOW-1 FIX: metrics['cache_misses'] incremented immediately on DQN miss,
+    #            not deferred to hit_result (which can return None).
     # ========================================================================
 
     def run_episode(self, cache, seed: int, phase: str = 'train') -> Dict:
@@ -153,6 +157,12 @@ class NOMADQNTrainer:
             episode_done is now derived from a flat enumeration of all
             (user_id, file_id) pairs, so it fires correctly on the very
             last request regardless of per-user request distribution.
+
+        LOW-1 fix:
+            DQN miss path now increments metrics['cache_misses'] immediately
+            when the peek confirms a miss, before falling through to NOMA.
+            Previously the miss count was deferred to hit_result which could
+            return None, silently underreporting miss_rate for all DQN runs.
         """
         set_seed(seed)
 
@@ -258,8 +268,11 @@ class NOMADQNTrainer:
                     if result.get('cic_enabled', False):
                         metrics['cic_enabled_strong'] += 1
                     continue  # No NOMA transmission needed
-                # else: cache miss -> fall through to NOMA processing below
-                miss_for_noma = True
+
+                # LOW-1 FIX: DQN miss confirmed here — increment directly.
+                # Do NOT defer to hit_result which can be None.
+                metrics['cache_misses'] += 1
+
             else:
                 should_update = (phase == 'train')
                 hit = cache.is_hit(file_id, update_stats=should_update)
@@ -269,7 +282,6 @@ class NOMADQNTrainer:
                     continue
                 else:
                     metrics['cache_misses'] += 1
-                    miss_for_noma = True
 
             # NOMA transmission for cache miss
             hit_result = self._process_single_request(
@@ -287,13 +299,14 @@ class NOMADQNTrainer:
                 is_dqn_eval=is_dqn_eval,
             )
 
-            # BUG-SIM-4 fix: accumulate DQN miss result from cache.request()
+            # BUG-SIM-4: propagate DQN post-NOMA cache side-effects (cic_enabled)
+            # Note: cache_misses is already incremented above (LOW-1 fix).
+            # hit_result here only reflects whether the DQN eviction policy
+            # re-cached the item after the miss (learning side-effect), not
+            # the original miss itself.
             if (is_dqn_train or is_dqn_eval) and hit_result is not None:
-                if hit_result:
-                    metrics['cache_hits']       += 1
-                    metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
-                else:
-                    metrics['cache_misses'] += 1
+                if hit_result.get('cic_enabled', False):
+                    metrics['cic_enabled_strong'] += 1
 
         # BUG-E FIX: pass flag so _compile_metrics uses correct denominator
         return self._compile_metrics(metrics, cache, phase,
@@ -311,7 +324,7 @@ class NOMADQNTrainer:
         is_dqn_eval: bool = False,
         paired_file: Optional[int] = None,
         paired_user: Optional[int] = None,
-    ) -> Optional[bool]:
+    ) -> Optional[Dict]:
         gain    = channel_gains[user_id]
         sinr    = self.cfg.TX_POWER * gain / self.cfg.NOISE_POWER
         success = sinr >= sinr_threshold
@@ -331,7 +344,7 @@ class NOMADQNTrainer:
             if cache.is_hit(paired_file, update_stats=False):
                 metrics['cic_enabled_weak'] += 1
 
-        hit = None
+        result = None
         if hasattr(cache, 'request') and (is_dqn_train or is_dqn_eval):
             safe_episode_done = episode_done if is_dqn_train else False
             result = cache.request(
@@ -344,11 +357,8 @@ class NOMADQNTrainer:
                 paired_file=paired_file,
                 paired_user=paired_user,
             )
-            hit = result['hit']
-            if result.get('cic_enabled', False):
-                metrics['cic_enabled_strong'] += 1
 
-        return hit
+        return result
 
     # ========================================================================
     # BATCH EPISODE RUNNER (baselines only)
