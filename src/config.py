@@ -11,6 +11,9 @@ Bug Fixes Applied (2026):
   BUG-CONFIG-1 : set_quick_test_config() step counts corrected
   BUG-CONFIG-2 : set_full_experiment_config() step counts corrected
   BUG-CONFIG-3 : RL_PRIORITY_BETA_FRAMES 100K → 20M (full training duration)
+  ROOT-1       : RL_REPLAY_BUFFER_SIZE 50K → 500K (was 20% overwritten/episode)
+  ROOT-2       : RL_WARM_UP_STEPS None(→1000) → 15,000 (1.5 full episodes)
+  ROOT-4       : RL_TRAIN_FREQUENCY 4 → 10 (reduce overfitting to recent data)
 """
 
 # Random seed for reproducibility
@@ -104,33 +107,19 @@ OUTAGE_SINR_MARGIN = 2.0
 # ------------------------------
 # Training Configuration
 # BUG-5 FIX: Steps per episode = NUM_USERS * REQUESTS_PER_USER = 10,000
-# (was 200 — the old value assumed only one request per user was processed;
-#  BUG-SIM-2 fix in stable_dqn_sim.py now processes all 50 requests/user)
 # ------------------------------
 RL_TRAINING_EPISODES   = 2000        # number of training episodes
-RL_STEPS_PER_EPISODE   = 10_000      # ✅ BUG-5 FIX: NUM_USERS(200) × REQ_PER_USER(50)
-RL_TRAINING_STEPS      = 20_000_000  # ✅ BUG-5 FIX: 2000 × 10,000
-
-# Training rationale:
-# - 2000 episodes, each with 10,000 requests → 20M total steps
-# - Matches research standard (arXiv:1712.08132, DRLCache)
-# - DO NOT manually set RL_TRAINING_STEPS to any other value;
-#   validate_config() will catch any mismatch.
+RL_STEPS_PER_EPISODE   = 10_000      # BUG-5 FIX: NUM_USERS(200) x REQ_PER_USER(50)
+RL_TRAINING_STEPS      = 20_000_000  # BUG-5 FIX: 2000 x 10,000
 
 # ------------------------------
 # Epsilon-Greedy Exploration
 # BUG-5 FIX: Decay steps corrected to 50% of actual total training steps
-# Was 200,000 → epsilon hit 0.01 after only 1% of real training.
-# Now 10,000,000 → epsilon decays correctly over first half of training.
 # ------------------------------
 RL_EPSILON_START        = 1.0
 RL_EPSILON_END          = 0.01
-RL_EPSILON_DECAY_STEPS  = 10_000_000  # ✅ BUG-5 FIX: 50% of 20M real steps
+RL_EPSILON_DECAY_STEPS  = 10_000_000  # BUG-5 FIX: 50% of 20M real steps
 RL_EVAL_EPSILON         = 0.0
-
-# Epsilon schedule:
-#   Steps 0 → 10M  (episodes   0–1000): ε = 1.0 → 0.01  (exploration)
-#   Steps 10M→ 20M (episodes 1000–2000): ε = 0.01         (exploitation)
 
 # ------------------------------
 # Neural Network Architecture
@@ -141,10 +130,16 @@ RL_HIDDEN_DIMS = [128, 128]   # Dueling DQN shared feature layers
 # ------------------------------
 # Learning Hyperparameters
 # ------------------------------
-RL_LEARNING_RATE = 0.0001     # Adam optimizer; research consensus
-RL_GAMMA         = 0.99       # Discount factor; values long-term hits
-RL_BATCH_SIZE    = 64
-RL_REPLAY_BUFFER_SIZE = 50000
+RL_LEARNING_RATE      = 0.0001   # Adam optimizer
+RL_GAMMA              = 0.99     # Discount factor
+RL_BATCH_SIZE         = 64
+
+# ROOT-1 FIX: Buffer was 50,000 (only 5 episodes worth).
+# Each episode writes 10,000 steps → 20% of buffer overwritten/episode.
+# After just 5 episodes the entire buffer was fresh data → catastrophic
+# forgetting. New size = 500,000 = 50 episodes worth of experience.
+# Rule of thumb: buffer >= 10-50x steps_per_episode.
+RL_REPLAY_BUFFER_SIZE = 500_000   # ROOT-1 FIX: was 50,000
 
 # ------------------------------
 # Training Stability
@@ -152,30 +147,33 @@ RL_REPLAY_BUFFER_SIZE = 50000
 RL_GRADIENT_CLIP      = 10.0   # Max norm for gradient clipping
 RL_TAU                = 0.005  # Soft target network update rate (every step)
 RL_TARGET_UPDATE_FREQ = 1000   # DEPRECATED: kept for backward compat
-RL_TRAIN_FREQUENCY    = 4      # Train every N environment steps
+
+# ROOT-4 FIX: train_freq was 4 → 2,500 gradient steps/episode on a 50K buffer
+# = buffer sampled ~5x per episode → overfitting to most recent data.
+# New: 1,000 gradient steps/episode on 500K buffer = sampled 0.2x/episode.
+RL_TRAIN_FREQUENCY    = 10    # ROOT-4 FIX: was 4
 
 # ------------------------------
 # Warm-Up Period
+# ROOT-2 FIX: Was None → auto-resolves to max(10*64, 1000) = 1,000.
+# Warm-up ended after 10% of episode 1 with zero-diversity buffer.
+# New: 15,000 = 1.5 full episodes of random exploration before any
+# gradient step. Ensures the buffer has diverse (s,a,r,s') transitions
+# from multiple random policies before learning begins.
 # ------------------------------
-RL_WARM_UP_STEPS = None   # None → auto: max(10 × BATCH_SIZE, 1000) = 1000
+RL_WARM_UP_STEPS = 15_000    # ROOT-2 FIX: was None (→ 1,000)
 
 # ------------------------------
 # Reward Function Parameters
 # BUG-7 FIX: RL_REWARD_CIC_ENABLED 7.0 → 2.0
-# Hierarchy must be strictly ordered to avoid perverse incentives:
-#   hit=+10  >>  CIC=+2  >  miss=-1  >>  failure=-5  >>  outage=-10
-# The old value of 7.0 created a gap of 8 between CIC and regular miss,
-# causing the DQN to optimise CIC (a side-effect it can't control) over
-# actual cache hits. dqn_cache_final._compute_reward() already hardcodes
-# +2.0; this value is now aligned to prevent confusion.
 # ------------------------------
-RL_REWARD_CACHE_HIT         =  10.0  # cache hit  (best)
-RL_REWARD_CIC_ENABLED       =   2.0  # ✅ BUG-7 FIX: was 7.0 (perverse incentive)
-RL_REWARD_CACHE_MISS_SUCCESS =  -1.0  # miss + NOMA success (no CIC)
-RL_REWARD_NOMA_FAILURE       =  -5.0  # miss + NOMA failure
-RL_REWARD_OUTAGE             = -10.0  # miss + outage (worst)
-RL_REWARD_POOR_BER           =  -2.0  # additional penalty for high BER
-RL_REWARD_GOOD_BER           =   1.0  # bonus for good BER
+RL_REWARD_CACHE_HIT          =  10.0
+RL_REWARD_CIC_ENABLED        =   2.0  # BUG-7 FIX: was 7.0
+RL_REWARD_CACHE_MISS_SUCCESS =  -1.0
+RL_REWARD_NOMA_FAILURE       =  -5.0
+RL_REWARD_OUTAGE             = -10.0
+RL_REWARD_POOR_BER           =  -2.0
+RL_REWARD_GOOD_BER           =   1.0
 
 # BER thresholds for reward shaping
 RL_BER_THRESHOLD_GOOD = 1e-4
@@ -184,19 +182,17 @@ RL_BER_THRESHOLD_POOR = 1e-2
 # ------------------------------
 # Prioritized Experience Replay (Schaul et al., ICLR 2016)
 # BUG-CONFIG-3 FIX: RL_PRIORITY_BETA_FRAMES 100K → 20M
-# Beta was fully annealing (0.4→1.0) after only 0.5% of training.
-# Should cover the full training run per the original PER paper.
 # ------------------------------
 RL_USE_PRIORITIZED_REPLAY  = True
-RL_PRIORITY_ALPHA          = 0.6    # priority exponent (0=uniform, 1=full)
+RL_PRIORITY_ALPHA          = 0.6
 RL_PRIORITY_BETA_START     = 0.4
 RL_PRIORITY_BETA_END       = 1.0
-RL_PRIORITY_BETA_FRAMES    = 20_000_000  # ✅ BUG-CONFIG-3 FIX: was 100,000
+RL_PRIORITY_BETA_FRAMES    = 20_000_000  # BUG-CONFIG-3 FIX: was 100,000
 
 # ------------------------------
 # Popularity Tracking
 # ------------------------------
-RL_POPULARITY_DECAY = 0.9  # EMA decay; full-vector decay applied in dqn_cache_final
+RL_POPULARITY_DECAY = 0.9
 
 # ------------------------------
 # Evaluation Configuration
@@ -227,21 +223,21 @@ COMPARE_POLICIES = ["topk", "lru", "lfu", "stable_dqn"]
 
 def set_debug_config():
     """
-    ✅ NEW (BUG-8 FIX): Tiny-scale config for rapid convergence verification.
+    Tiny-scale config for rapid convergence verification (~2-3 min on CPU).
 
-    Use this FIRST after any code change to confirm the DQN is actually
-    learning (hit rate should clearly rise above TopK within ~10 episodes).
-    Takes ~2-3 minutes on CPU.
+    Use this FIRST after any code change. DQN hit rate should clearly
+    rise above TopK within ~10 episodes if everything is working.
 
     Scale:
         NUM_FILES=100, CACHE_SIZE=10 (10%), NUM_USERS=20, REQ_PER_USER=20
-        Steps/episode = 20 * 20 = 400
+        Steps/episode = 400
         Total steps   = 50 * 400 = 20,000
     """
     global NUM_FILES, CACHE_SIZE, NUM_USERS, REQUESTS_PER_USER
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
     global RL_REPLAY_BUFFER_SIZE, RL_WARM_UP_STEPS, RL_PRIORITY_BETA_FRAMES
+    global RL_TRAIN_FREQUENCY
 
     NUM_FILES          = 100
     CACHE_SIZE         = 10
@@ -249,103 +245,101 @@ def set_debug_config():
     REQUESTS_PER_USER  = 20
 
     _steps_per_ep = NUM_USERS * REQUESTS_PER_USER   # 400
-    RL_TRAINING_EPISODES   = 50
-    RL_STEPS_PER_EPISODE   = _steps_per_ep           # 400
-    RL_TRAINING_STEPS      = 50 * _steps_per_ep      # 20,000
-    RL_EPSILON_DECAY_STEPS = 50 * _steps_per_ep // 2 # 10,000  (50% of total)
-    NUM_RUNS               = 5
-    RL_EVAL_REQUESTS       = 500
-    RL_REPLAY_BUFFER_SIZE  = 5000
-    RL_WARM_UP_STEPS       = 200
-    RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS       # anneal over full run
+    RL_TRAINING_EPISODES    = 50
+    RL_STEPS_PER_EPISODE    = _steps_per_ep            # 400
+    RL_TRAINING_STEPS       = 50 * _steps_per_ep       # 20,000
+    RL_EPSILON_DECAY_STEPS  = 50 * _steps_per_ep // 2  # 10,000
+    NUM_RUNS                = 5
+    RL_EVAL_REQUESTS        = 500
+    # ROOT-1/2/4 ratios preserved at debug scale:
+    RL_REPLAY_BUFFER_SIZE   = 20_000   # 50x steps_per_ep
+    RL_WARM_UP_STEPS        = 600      # 1.5x steps_per_ep
+    RL_TRAIN_FREQUENCY      = 10
+    RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
 
-    print("🐛 Debug Config Enabled (BUG-8 fix)")
-    print(f"   Catalog      : {NUM_FILES} files, cache={CACHE_SIZE} ({CACHE_SIZE/NUM_FILES*100:.0f}%)")
-    print(f"   Users        : {NUM_USERS} users × {REQUESTS_PER_USER} req = {_steps_per_ep} steps/ep")
-    print(f"   Training     : {RL_TRAINING_EPISODES} episodes × {RL_STEPS_PER_EPISODE} steps = {RL_TRAINING_STEPS:,} total")
-    print(f"   ε decay      : over first {RL_EPSILON_DECAY_STEPS:,} steps (50%)")
-    print(f"   Expected time: ~2-3 minutes on CPU")
-    print(f"   Pass criteria: DQN hit_rate > TopK within ~10 episodes")
+    print("[DEBUG] Config enabled")
+    print(f"  Catalog   : {NUM_FILES} files, cache={CACHE_SIZE} ({CACHE_SIZE/NUM_FILES*100:.0f}%)")
+    print(f"  Users     : {NUM_USERS} x {REQUESTS_PER_USER} req = {_steps_per_ep} steps/ep")
+    print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE} = {RL_TRAINING_STEPS:,} total")
+    print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,} (50x steps/ep)")
+    print(f"  Warm-up   : {RL_WARM_UP_STEPS} steps (1.5x steps/ep)")
+    print(f"  Expected  : ~2-3 minutes on CPU")
 
 
 def set_quick_test_config():
     """
     Quick test configuration (~15-20 minutes on CPU).
-    BUG-CONFIG-1 FIX: step counts updated to match actual steps/episode=10,000.
+    BUG-CONFIG-1 FIX + ROOT-1/2/4 ratios applied.
     """
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
-    global RL_PRIORITY_BETA_FRAMES
+    global RL_PRIORITY_BETA_FRAMES, RL_REPLAY_BUFFER_SIZE, RL_WARM_UP_STEPS
+    global RL_TRAIN_FREQUENCY
 
-    _steps_per_ep = NUM_USERS * REQUESTS_PER_USER   # 10,000 (uses current globals)
-    RL_TRAINING_EPISODES   = 100
-    RL_STEPS_PER_EPISODE   = _steps_per_ep            # ✅ BUG-CONFIG-1 FIX
-    RL_TRAINING_STEPS      = 100 * _steps_per_ep      # ✅ 1,000,000 (was 20,000)
-    RL_EPSILON_DECAY_STEPS = 100 * _steps_per_ep // 2 # ✅ 500,000  (was 10,000)
-    NUM_RUNS               = 10
-    RL_EVAL_REQUESTS       = 2000
+    _steps_per_ep = NUM_USERS * REQUESTS_PER_USER
+    RL_TRAINING_EPISODES    = 100
+    RL_STEPS_PER_EPISODE    = _steps_per_ep
+    RL_TRAINING_STEPS       = 100 * _steps_per_ep
+    RL_EPSILON_DECAY_STEPS  = 100 * _steps_per_ep // 2
+    NUM_RUNS                = 10
+    RL_EVAL_REQUESTS        = 2000
+    RL_REPLAY_BUFFER_SIZE   = 50 * _steps_per_ep   # 500,000
+    RL_WARM_UP_STEPS        = int(1.5 * _steps_per_ep)  # 15,000
+    RL_TRAIN_FREQUENCY      = 10
     RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
 
-    print("⚡ Quick Test Config Enabled")
-    print(f"   Training: {RL_TRAINING_EPISODES} episodes × {RL_STEPS_PER_EPISODE:,} steps = {RL_TRAINING_STEPS:,} total")
-    print(f"   ε decay : over first {RL_EPSILON_DECAY_STEPS:,} steps (50%)")
-    print(f"   Eval    : {NUM_RUNS} runs × {RL_EVAL_REQUESTS} requests")
-    print(f"   Expected time: ~15-20 minutes on CPU")
+    print("[QUICK TEST] Config enabled")
+    print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE:,} = {RL_TRAINING_STEPS:,} total")
+    print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,}")
+    print(f"  Expected  : ~15-20 minutes on CPU")
 
 
 def set_full_experiment_config():
     """
-    Full experiment configuration for paper results (~4-6 hours on CPU, ~1 hr on GPU).
-    BUG-CONFIG-2 FIX: step counts updated to match actual steps/episode=10,000.
+    Full experiment configuration for paper results.
+    BUG-CONFIG-2 FIX + ROOT-1/2/4 ratios applied.
     """
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
-    global RL_PRIORITY_BETA_FRAMES
+    global RL_PRIORITY_BETA_FRAMES, RL_REPLAY_BUFFER_SIZE, RL_WARM_UP_STEPS
+    global RL_TRAIN_FREQUENCY
 
-    _steps_per_ep = NUM_USERS * REQUESTS_PER_USER   # 10,000
+    _steps_per_ep = NUM_USERS * REQUESTS_PER_USER
     RL_TRAINING_EPISODES    = 2000
-    RL_STEPS_PER_EPISODE    = _steps_per_ep           # ✅ BUG-CONFIG-2 FIX
-    RL_TRAINING_STEPS       = 2000 * _steps_per_ep    # ✅ 20,000,000 (was 400,000)
-    RL_EPSILON_DECAY_STEPS  = 2000 * _steps_per_ep // 2  # ✅ 10,000,000 (was 200,000)
+    RL_STEPS_PER_EPISODE    = _steps_per_ep
+    RL_TRAINING_STEPS       = 2000 * _steps_per_ep
+    RL_EPSILON_DECAY_STEPS  = 2000 * _steps_per_ep // 2
     NUM_RUNS                = 100
     RL_EVAL_REQUESTS        = 5000
+    RL_REPLAY_BUFFER_SIZE   = 50 * _steps_per_ep   # 500,000
+    RL_WARM_UP_STEPS        = int(1.5 * _steps_per_ep)  # 15,000
+    RL_TRAIN_FREQUENCY      = 10
     RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
 
-    print("🎓 Full Experiment Config Enabled (Research Standard)")
-    print(f"   Training: {RL_TRAINING_EPISODES} episodes × {RL_STEPS_PER_EPISODE:,} steps = {RL_TRAINING_STEPS:,} total")
-    print(f"   ε decay : over first {RL_EPSILON_DECAY_STEPS:,} steps (50%)")
-    print(f"   Eval    : {NUM_RUNS} runs × {RL_EVAL_REQUESTS} requests")
-    print(f"   Expected time: ~4-6 hours on CPU, ~1 hour on GPU")
+    print("[FULL EXPERIMENT] Config enabled")
+    print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE:,} = {RL_TRAINING_STEPS:,} total")
+    print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,}")
+    print(f"  Expected  : ~4-6 hrs CPU, ~1 hr GPU")
 
 
 def set_aggressive_learning_config():
-    """
-    Aggressive learning configuration (faster convergence, less stable).
-    """
+    """Aggressive learning config (faster convergence, less stable)."""
     global RL_LEARNING_RATE, RL_BATCH_SIZE, RL_HIDDEN_DIMS, RL_EPSILON_DECAY_STEPS
-
     RL_LEARNING_RATE       = 0.0005
     RL_BATCH_SIZE          = 128
     RL_HIDDEN_DIMS         = [256, 128]
-    RL_EPSILON_DECAY_STEPS = RL_TRAINING_STEPS // 3   # decay over first third
-
-    print("⚡ Aggressive Learning Config Enabled")
-    print("   ⚠️  May be less stable but converges faster")
+    RL_EPSILON_DECAY_STEPS = RL_TRAINING_STEPS // 3
+    print("[AGGRESSIVE] Config enabled — may be less stable")
 
 
 def set_conservative_learning_config():
-    """
-    Conservative learning configuration (more stable, slower convergence).
-    """
+    """Conservative learning config (more stable, slower convergence)."""
     global RL_LEARNING_RATE, RL_BATCH_SIZE, RL_GRADIENT_CLIP, RL_TAU
-
     RL_LEARNING_RATE  = 0.00005
     RL_BATCH_SIZE     = 32
     RL_GRADIENT_CLIP  = 5.0
     RL_TAU            = 0.001
-
-    print("🐢 Conservative Learning Config Enabled")
-    print("   ✅ More stable but requires longer training")
+    print("[CONSERVATIVE] Config enabled — more stable, slower")
 
 
 # ============================================================================
@@ -353,7 +347,6 @@ def set_conservative_learning_config():
 # ============================================================================
 
 def get_noma_config():
-    """Return NOMA-specific configuration as a dictionary."""
     return {
         'TX_POWER': TX_POWER, 'NOISE_POWER': NOISE_POWER,
         'CELL_RADIUS': CELL_RADIUS, 'PATHLOSS_EXPONENT': PATHLOSS_EXPONENT,
@@ -369,7 +362,6 @@ def get_noma_config():
 
 
 def get_rl_config():
-    """Return all RL_ parameters as a dictionary."""
     import sys
     module = sys.modules[__name__]
     return {attr: getattr(module, attr)
@@ -377,78 +369,40 @@ def get_rl_config():
 
 
 def print_noma_config():
-    """Print NOMA configuration for verification."""
     print("\n" + "="*70)
     print("NOMA SYSTEM CONFIGURATION")
     print("="*70)
-    print(f"\n📡 CHANNEL PARAMETERS:")
-    print(f"  TX Power            : {TX_POWER}W")
+    print(f"\n  TX Power            : {TX_POWER}W")
     print(f"  Noise Power         : {NOISE_POWER}W")
     print(f"  Cell Radius         : {CELL_RADIUS}m")
     print(f"  Path Loss Exponent  : {PATHLOSS_EXPONENT}")
     print(f"  Fading Type         : {FADING_TYPE}")
-    if FADING_TYPE in ['rician', 'mixed']:
-        print(f"  Rician K-factor     : {RICIAN_K_FACTOR_DB} dB")
-    if FADING_TYPE == 'mixed':
-        print(f"  LoS Probability     : {LOS_PROBABILITY}")
-    print(f"\n👥 USER PAIRING:")
-    print(f"  Method              : {PAIRING_METHOD}")
-    print(f"  Number of Users     : {NUM_USERS}")
-    print(f"\n⚡ POWER ALLOCATION:")
-    print(f"  Method              : {POWER_ALLOC_METHOD}")
-    print(f"  p_weak              : {POWER_COEFF_WEAK}")
-    print(f"  p_strong            : {POWER_COEFF_STRONG}")
-    print(f"\n🔄 SIC PARAMETERS:")
-    print(f"  Imperfection Factor : {SIC_IMPERFECTION}")
+    print(f"  Pairing Method      : {PAIRING_METHOD}")
+    print(f"  Power Alloc Method  : {POWER_ALLOC_METHOD}")
+    print(f"  SIC Imperfection    : {SIC_IMPERFECTION}")
     print(f"  Target Rate         : {TARGET_RATE_BPS} bps/Hz")
-    print(f"\n💾 CACHE-AIDED FEATURES:")
     print(f"  CIC Enabled         : {ENABLE_CIC}")
-    print(f"  Perfect CIC         : {CIC_PERFECT}")
-    print(f"  Cache Size          : {CACHE_SIZE}")
     print("\n" + "="*70 + "\n")
 
 
 def print_rl_config():
-    """Print RL configuration for verification."""
     print("\n" + "="*70)
     print("STABLE DQN CACHE CONFIGURATION")
     print("="*70)
     actual_steps = NUM_USERS * REQUESTS_PER_USER
-    print(f"\n📋 TRAINING:")
     print(f"  Episodes            : {RL_TRAINING_EPISODES}")
-    print(f"  Steps / episode     : {RL_STEPS_PER_EPISODE:,}  (NUM_USERS×REQ_PER_USER={actual_steps:,})")
-    if RL_STEPS_PER_EPISODE != actual_steps:
-        print(f"  ⚠️  MISMATCH: config says {RL_STEPS_PER_EPISODE}, actual = {actual_steps}")
+    print(f"  Steps / episode     : {RL_STEPS_PER_EPISODE:,}  (actual={actual_steps:,})")
     print(f"  Total steps         : {RL_TRAINING_STEPS:,}")
-    print(f"\n📉 EPSILON DECAY:")
-    print(f"  Start               : {RL_EPSILON_START}")
-    print(f"  End                 : {RL_EPSILON_END}")
-    print(f"  Decay over          : {RL_EPSILON_DECAY_STEPS:,} steps ({RL_EPSILON_DECAY_STEPS/max(RL_TRAINING_STEPS,1)*100:.0f}% of training)")
-    print(f"\n🧠 NETWORK:")
-    print(f"  Architecture        : {RL_HIDDEN_DIMS}")
-    print(f"  Learning Rate       : {RL_LEARNING_RATE}")
-    print(f"  Batch Size          : {RL_BATCH_SIZE}")
-    print(f"  Replay Buffer       : {RL_REPLAY_BUFFER_SIZE:,}")
-    print(f"  Gamma               : {RL_GAMMA}")
-    print(f"\n⚖️  REWARD STRUCTURE:")
-    print(f"  Cache hit           : +{RL_REWARD_CACHE_HIT}")
-    print(f"  CIC enabled         : +{RL_REWARD_CIC_ENABLED}  (BUG-7 fix: was 7.0)")
-    print(f"  Miss + success      :  {RL_REWARD_CACHE_MISS_SUCCESS}")
-    print(f"  Miss + failure      :  {RL_REWARD_NOMA_FAILURE}")
-    print(f"  Outage              :  {RL_REWARD_OUTAGE}")
-    print(f"\n🎯 STABILITY:")
-    print(f"  Gradient Clip       : {RL_GRADIENT_CLIP}")
-    print(f"  Soft Update τ       : {RL_TAU}")
-    print(f"  Train Frequency     : every {RL_TRAIN_FREQUENCY} steps")
-    print(f"  Prioritized Replay  : {RL_USE_PRIORITIZED_REPLAY}")
-    if RL_USE_PRIORITIZED_REPLAY:
-        print(f"    α                 : {RL_PRIORITY_ALPHA}")
-        print(f"    β                 : {RL_PRIORITY_BETA_START} → {RL_PRIORITY_BETA_END} over {RL_PRIORITY_BETA_FRAMES:,} frames")
+    print(f"  Replay buffer       : {RL_REPLAY_BUFFER_SIZE:,}  ({RL_REPLAY_BUFFER_SIZE//RL_STEPS_PER_EPISODE}x steps/ep)")
+    print(f"  Warm-up             : {RL_WARM_UP_STEPS:,} steps")
+    print(f"  Train frequency     : every {RL_TRAIN_FREQUENCY} steps")
+    print(f"  Epsilon decay       : {RL_EPSILON_START} -> {RL_EPSILON_END} over {RL_EPSILON_DECAY_STEPS:,} steps")
+    print(f"  PER beta frames     : {RL_PRIORITY_BETA_FRAMES:,}")
     print("\n" + "="*70 + "\n")
 
 
 def validate_config():
-    """Validate configuration parameters and print any issues found."""
+    """Validate configuration parameters. Returns True if all OK."""
     issues = []
 
     if not (0 < CACHE_SIZE <= NUM_FILES):
@@ -458,25 +412,20 @@ def validate_config():
     if not (0 < RL_LEARNING_RATE < 1):
         issues.append(f"RL_LEARNING_RATE ({RL_LEARNING_RATE}) out of range")
     if RL_EPSILON_START < RL_EPSILON_END:
-        issues.append(f"RL_EPSILON_START ({RL_EPSILON_START}) must be >= RL_EPSILON_END ({RL_EPSILON_END})")
+        issues.append(f"RL_EPSILON_START must be >= RL_EPSILON_END")
     if RL_BATCH_SIZE > RL_REPLAY_BUFFER_SIZE:
         issues.append(f"RL_BATCH_SIZE ({RL_BATCH_SIZE}) > RL_REPLAY_BUFFER_SIZE ({RL_REPLAY_BUFFER_SIZE})")
 
-    # ✅ Correct check: use actual steps, not the config constant
     actual_steps_per_ep = NUM_USERS * REQUESTS_PER_USER
     expected_total      = RL_TRAINING_EPISODES * actual_steps_per_ep
     if RL_TRAINING_STEPS != expected_total:
         issues.append(
             f"RL_TRAINING_STEPS ({RL_TRAINING_STEPS:,}) != "
-            f"EPISODES×ACTUAL_STEPS ({RL_TRAINING_EPISODES}×{actual_steps_per_ep}={expected_total:,}). "
-            f"Set RL_TRAINING_STEPS = {expected_total:,}"
-        )
+            f"EPISODES x ACTUAL_STEPS ({expected_total:,})")
     if RL_STEPS_PER_EPISODE != actual_steps_per_ep:
         issues.append(
             f"RL_STEPS_PER_EPISODE ({RL_STEPS_PER_EPISODE:,}) != "
-            f"NUM_USERS×REQUESTS_PER_USER ({actual_steps_per_ep:,}). "
-            f"Set RL_STEPS_PER_EPISODE = {actual_steps_per_ep:,}"
-        )
+            f"NUM_USERS x REQUESTS_PER_USER ({actual_steps_per_ep:,})")
 
     if not (0 < POWER_COEFF_WEAK < 1):
         issues.append(f"POWER_COEFF_WEAK ({POWER_COEFF_WEAK}) must be in (0,1)")
@@ -490,31 +439,29 @@ def validate_config():
         issues.append(f"Invalid PAIRING_METHOD: '{PAIRING_METHOD}'")
     if RL_USE_PRIORITIZED_REPLAY:
         if not (0 < RL_PRIORITY_ALPHA <= 1):
-            issues.append(f"RL_PRIORITY_ALPHA ({RL_PRIORITY_ALPHA}) must be in (0,1]")
+            issues.append(f"RL_PRIORITY_ALPHA must be in (0,1]")
         if not (0 < RL_PRIORITY_BETA_START <= 1):
-            issues.append(f"RL_PRIORITY_BETA_START ({RL_PRIORITY_BETA_START}) must be in (0,1]")
+            issues.append(f"RL_PRIORITY_BETA_START must be in (0,1]")
         if RL_PRIORITY_BETA_END != 1.0:
-            issues.append(f"RL_PRIORITY_BETA_END should be 1.0 per Schaul et al. (got {RL_PRIORITY_BETA_END})")
+            issues.append(f"RL_PRIORITY_BETA_END should be 1.0")
     if not (0 < RL_TAU < 1):
-        issues.append(f"RL_TAU ({RL_TAU}) must be in (0,1)")
+        issues.append(f"RL_TAU must be in (0,1)")
     if RL_REWARD_CIC_ENABLED >= RL_REWARD_CACHE_HIT:
         issues.append(
             f"RL_REWARD_CIC_ENABLED ({RL_REWARD_CIC_ENABLED}) must be < "
-            f"RL_REWARD_CACHE_HIT ({RL_REWARD_CACHE_HIT}) to avoid perverse incentive"
-        )
+            f"RL_REWARD_CACHE_HIT ({RL_REWARD_CACHE_HIT})")
     if RL_REWARD_CIC_ENABLED <= RL_REWARD_NOMA_FAILURE:
         issues.append(
             f"RL_REWARD_CIC_ENABLED ({RL_REWARD_CIC_ENABLED}) must be > "
-            f"RL_REWARD_NOMA_FAILURE ({RL_REWARD_NOMA_FAILURE})"
-        )
+            f"RL_REWARD_NOMA_FAILURE ({RL_REWARD_NOMA_FAILURE})")
 
     if issues:
-        print("⚠️  Configuration Issues Found:")
+        print("[WARN] Configuration Issues:")
         for issue in issues:
-            print(f"   - {issue}")
+            print(f"  - {issue}")
         return False
     else:
-        print("✅ Configuration validated successfully")
+        print("[OK] Configuration validated successfully")
         return True
 
 
