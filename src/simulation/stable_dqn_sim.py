@@ -3,46 +3,19 @@ src/simulation/stable_dqn_sim.py
 
 Stable NOMA-Aware DQN Cache Simulator with Train-Test-Eval Workflow
 
-This module implements a comprehensive DQN training and evaluation pipeline for
-Cache-Aided NOMA systems with proper separation of:
-1. Training Phase: DQN learns optimal caching policies
-2. Testing Phase: Validate DQN performance during training
-3. Evaluation Phase: Fair comparison against baseline policies
-
-Key Features:
-- NOMA-aware state representation (channel gains, SIC/CIC status)
-- Cache-Aided Interference Cancellation (CIC) rewards
-- Proper train/test/eval split (following ML best practices)
-- Baseline comparison (TopK, LRU, LFU, Random)
-- Comprehensive metrics tracking
-- Model checkpointing and loading
-
-Bug Fixes (2026):
+Bug Fix History (2026 Audit):
 - BUG-4    (HIGH):     episode_done only True on very last training episode
-- BUG-SIM-1 (HIGH):   DQN double-counts stats (is_hit + cache.request both fire)
-- BUG-SIM-2 (CRITICAL): 98% of requests silently dropped (only [0] processed)
+- BUG-SIM-1 (HIGH):   DQN double-counts stats
+- BUG-SIM-2 (CRITICAL): 98% of requests silently dropped
 - BUG-SIM-4 (MEDIUM): cache.request() hit result not fed back to metrics
-- BUG-SIM-5 (HIGH):   episode_done forwarded to every request, not just last
-- ROOT-3 (CRITICAL):  _process_single_request() never passed paired_file to
-                      cache.request() -> CIC reward permanently unreachable.
-                      Fixed by running pair_users() inside run_episode() and
-                      forwarding paired_file/paired_user to every cache.request().
+- BUG-SIM-5 (HIGH):   episode_done forwarded to every request
+- ROOT-3 (CRITICAL):  paired_file never passed to cache.request()
 - FIX-1 (CRITICAL):   evaluate_policy() routed DQN through run_batch_episode()
-                      which never calls cache.request() in eval phase ->
-                      all 10 DQN eval runs returned identical frozen stats.
-                      Fixed: DQN now uses run_episode(phase='eval').
-- FIX-2 (HIGH):       _process_single_request() blocked cache.request() for
-                      eval phase -> CIC=0.000 in all eval runs.
-                      Fixed: DQN cache.request() now called in eval too
-                      (with episode_done=False always in eval).
-
-Research References:
-- "Power Allocation in Cache-Aided NOMA Systems" (arXiv:1909.11074)
-- "Cache-Aided NOMA Mobile Edge Computing" (arXiv:1906.08812)
-- "Deep Q-Learning-Based Content Caching" (IEEE, Jiang et al., 2019)
-
-Author: Cache-Aided NOMA Team
-Date: December 12, 2025  |  Revised: March 2026
+- FIX-2 (HIGH):       _process_single_request() blocked cache.request() in eval
+- BUG-A (HIGH):       DQN hits still went through NOMA (miss_for_noma=True always)
+- BUG-C (HIGH):       _test_cache() phase='test' -> DQN fell into baseline path
+- BUG-D (MEDIUM):     episode_done=True could never fire when users had 0 requests
+- BUG-E (LOW):        outage_probability denominator mismatch between episode paths
 """
 
 import numpy as np
@@ -56,11 +29,9 @@ import os
 import json
 from datetime import datetime
 
-# Project imports
 from src import config
 from src.utils import set_seed, sample_zipf_catalog
 
-# NOMA module imports
 from src.noma import (
     generate_user_positions,
     compute_channel_gains,
@@ -71,7 +42,6 @@ from src.noma import (
     rate_from_sinr
 )
 
-# Caching module imports
 from src.caching import (
     create_cache,
     CacheBase,
@@ -89,18 +59,9 @@ except ImportError:
     print("Warning: DQN cache not available")
 
 
-# ============================================================================
-# NOMA-AWARE DQN TRAINER
-# ============================================================================
-
 class NOMADQNTrainer:
     """
-    NOMA-Aware DQN Training System.
-
-    Implements proper ML workflow:
-    1. Training  : Learn from workload
-    2. Testing   : Validate during training (early stopping)
-    3. Evaluation: Final assessment (never seen during training)
+    NOMA-Aware DQN Training System with proper train/test/eval separation.
     """
 
     def __init__(self, cfg, verbose: bool = True):
@@ -172,41 +133,32 @@ class NOMADQNTrainer:
 
     # ========================================================================
     # EPISODE RUNNER
-    # ROOT-3 FIX: pair_users() now called inside run_episode().
-    # FIX-2: cache.request() now called for DQN in eval mode too.
+    # BUG-A FIX: peek with is_hit(update_stats=False) to set miss_for_noma;
+    #            cache.request() remains the single authoritative call.
+    # BUG-D FIX: episode_done derived from flat request index, not per-user.
     # ========================================================================
 
     def run_episode(self, cache, seed: int, phase: str = 'train') -> Dict:
         """
         Run one NOMA-aware episode.
 
-        ROOT-3 fix:
-            pair_users() is now called on ALL users (not just miss users) at
-            the start of the episode to establish stable pairing for the
-            entire episode. Each request then knows its NOMA partner and
-            passes paired_file to cache.request(), making cic_enabled
-            reachable for the first time in the DQN training path.
+        BUG-A fix:
+            Previously miss_for_noma=True was set unconditionally for DQN,
+            causing every hit to still trigger a NOMA transmission call.
+            Now we peek with is_hit(update_stats=False) to decide whether
+            to skip to the next request. cache.request() is still the
+            single authoritative stat-recording + learning call for DQN.
 
-        FIX-2:
-            cache.request() is now called for DQNCache in eval mode too
-            (with episode_done=False always). This makes CIC metrics live
-            during evaluation instead of permanently showing 0.000.
-
-        BUG-4 / BUG-SIM-5 fix:
-            episode_done=True injected into the very last cache.request() only.
-
-        BUG-SIM-2 fix:
-            All REQUESTS_PER_USER requests per user are now processed.
-
-        BUG-SIM-1 fix:
-            For DQN caches in train phase, the standalone is_hit() call is
-            removed. cache.request() is the single authoritative call.
+        BUG-D fix:
+            episode_done is now derived from a flat enumeration of all
+            (user_id, file_id) pairs, so it fires correctly on the very
+            last request regardless of per-user request distribution.
         """
         set_seed(seed)
 
         is_dqn = isinstance(cache, DQNCache)
         is_dqn_train = is_dqn and phase == 'train'
-        is_dqn_eval  = is_dqn and phase == 'eval'
+        is_dqn_eval  = is_dqn and (phase == 'eval')
 
         metrics = {
             'total_requests':     0,
@@ -225,7 +177,6 @@ class NOMADQNTrainer:
             'total_energy':       0.0,
         }
 
-        # -- Channel generation ----------------------------------------------
         user_positions = generate_user_positions(
             self.cfg.NUM_USERS, self.cfg.CELL_RADIUS, seed=seed)
         channel_gains = compute_channel_gains(
@@ -236,7 +187,6 @@ class NOMADQNTrainer:
             los_probability=self.cfg.LOS_PROBABILITY,
         )
 
-        # -- Request generation ----------------------------------------------
         total_requests_in_episode = self.cfg.NUM_USERS * self.cfg.REQUESTS_PER_USER
         file_requests = sample_zipf_catalog(
             self.cfg.NUM_FILES, self.cfg.ZIPF_ALPHA,
@@ -248,13 +198,11 @@ class NOMADQNTrainer:
         for file_id, user_id in zip(file_requests, requesting_users):
             user_requests[int(user_id)].append(int(file_id))
 
-        # -- Populate TopK cache if needed -----------------------------------
         if isinstance(cache, StaticTopKCache) and len(cache) == 0:
             cnt     = Counter(file_requests)
             ranking = [item for item, _ in cnt.most_common()]
             cache.populate(ranking)
 
-        # -- ROOT-3 FIX: establish episode-wide NOMA pairing -----------------
         all_users = list(range(self.cfg.NUM_USERS))
         episode_pairs, episode_leftover = pair_users(
             all_users, channel_gains, method=self.cfg.PAIRING_METHOD)
@@ -266,80 +214,93 @@ class NOMADQNTrainer:
         if episode_leftover is not None:
             user_partner[episode_leftover] = -1
 
-        # -- req_remaining for episode_done signalling (BUG-4/SIM-5 fix) ----
-        req_remaining = [total_requests_in_episode]
-
         sinr_threshold = sinr_threshold_from_rate(self.cfg.TARGET_RATE_BPS)
 
-        # -- Process all requests --------------------------------------------
+        # BUG-D FIX: build a flat ordered list of (user_id, file_id) pairs
+        # so episode_done fires correctly on the LAST actual request.
+        flat_requests: List[Tuple[int, int]] = []
         for user_id in range(self.cfg.NUM_USERS):
-            if user_id not in user_requests:
-                continue
+            for file_id in user_requests.get(user_id, []):
+                flat_requests.append((user_id, int(file_id)))
+        total_flat = len(flat_requests)
 
+        for req_idx, (user_id, file_id) in enumerate(flat_requests):
+            is_last_request = (req_idx == total_flat - 1) and (phase == 'train')
             partner_id = user_partner.get(user_id, -1)
 
-            for file_id in user_requests[user_id]:
+            paired_file = None
+            if partner_id >= 0 and partner_id in user_requests:
+                partner_reqs = user_requests[partner_id]
+                if partner_reqs:
+                    paired_file = partner_reqs[0]
 
-                req_remaining[0] -= 1
-                is_last_request = (req_remaining[0] == 0) and (phase == 'train')
+            metrics['total_requests'] += 1
 
-                paired_file = None
-                if partner_id >= 0 and partner_id in user_requests:
-                    partner_reqs = user_requests[partner_id]
-                    if partner_reqs:
-                        paired_file = partner_reqs[0]
-
-                # -- Cache check (BUG-SIM-1 fix) ----------------------------
-                if is_dqn_train or is_dqn_eval:
-                    # DQN: cache.request() is the single authority (train+eval)
-                    metrics['total_requests'] += 1
-                    miss_for_noma  = True
-                    user_file_hit  = False
-                else:
-                    should_update = (phase == 'train')
-                    hit = cache.is_hit(file_id, update_stats=should_update)
-                    metrics['total_requests'] += 1
-                    if hit:
-                        metrics['cache_hits']       += 1
-                        metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
-                        miss_for_noma = False
-                    else:
-                        metrics['cache_misses'] += 1
-                        miss_for_noma = True
-
-                if not miss_for_noma:
+            # BUG-A FIX: peek to decide whether to skip NOMA for DQN hits.
+            # For DQN: peek without updating stats (cache.request() owns stats).
+            # For baselines: is_hit() IS the authoritative stat call.
+            if is_dqn_train or is_dqn_eval:
+                is_already_cached = cache.is_hit(file_id, update_stats=False)
+                if is_already_cached:
+                    # Let cache.request() handle the hit (stats + learning)
+                    result = cache.request(
+                        item=file_id,
+                        user_id=user_id,
+                        channel_gain=channel_gains[user_id],
+                        noma_success=True,
+                        outage=False,
+                        episode_done=(is_last_request if is_dqn_train else False),
+                        paired_file=paired_file,
+                        paired_user=partner_id if partner_id >= 0 else None,
+                    )
+                    metrics['cache_hits']       += 1
+                    metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
+                    if result.get('cic_enabled', False):
+                        metrics['cic_enabled_strong'] += 1
+                    continue  # No NOMA transmission needed
+                # else: cache miss -> fall through to NOMA processing below
+                miss_for_noma = True
+            else:
+                should_update = (phase == 'train')
+                hit = cache.is_hit(file_id, update_stats=should_update)
+                if hit:
+                    metrics['cache_hits']       += 1
+                    metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
                     continue
+                else:
+                    metrics['cache_misses'] += 1
+                    miss_for_noma = True
 
-                # -- NOMA single-request transmission -----------------------
-                hit_result = self._process_single_request(
-                    cache=cache,
-                    user_id=user_id,
-                    file_id=file_id,
-                    paired_file=paired_file,
-                    paired_user=partner_id if partner_id >= 0 else None,
-                    channel_gains=channel_gains,
-                    sinr_threshold=sinr_threshold,
-                    metrics=metrics,
-                    episode_done=is_last_request,
-                    phase=phase,
-                    is_dqn_train=is_dqn_train,
-                    is_dqn_eval=is_dqn_eval,
-                )
+            # NOMA transmission for cache miss
+            hit_result = self._process_single_request(
+                cache=cache,
+                user_id=user_id,
+                file_id=file_id,
+                paired_file=paired_file,
+                paired_user=partner_id if partner_id >= 0 else None,
+                channel_gains=channel_gains,
+                sinr_threshold=sinr_threshold,
+                metrics=metrics,
+                episode_done=is_last_request,
+                phase=phase,
+                is_dqn_train=is_dqn_train,
+                is_dqn_eval=is_dqn_eval,
+            )
 
-                # BUG-SIM-4 fix: accumulate DQN hit result
-                if (is_dqn_train or is_dqn_eval) and hit_result is not None:
-                    if hit_result:
-                        metrics['cache_hits']       += 1
-                        metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
-                    else:
-                        metrics['cache_misses'] += 1
+            # BUG-SIM-4 fix: accumulate DQN miss result from cache.request()
+            if (is_dqn_train or is_dqn_eval) and hit_result is not None:
+                if hit_result:
+                    metrics['cache_hits']       += 1
+                    metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
+                else:
+                    metrics['cache_misses'] += 1
 
-        return self._compile_metrics(metrics, cache, phase)
+        # BUG-E FIX: pass flag so _compile_metrics uses correct denominator
+        return self._compile_metrics(metrics, cache, phase,
+                                     single_user_per_noma=True)
 
     # ========================================================================
     # SINGLE-REQUEST NOMA HANDLER
-    # ROOT-3 FIX: forwards paired_file + paired_user
-    # FIX-2: calls cache.request() for DQN in eval mode
     # ========================================================================
 
     def _process_single_request(
@@ -351,13 +312,6 @@ class NOMADQNTrainer:
         paired_file: Optional[int] = None,
         paired_user: Optional[int] = None,
     ) -> Optional[bool]:
-        """
-        Process one user's file request through NOMA.
-
-        FIX-2: cache.request() is now called for DQNCache in eval mode
-        (episode_done always False in eval to avoid corrupting the model).
-        This makes CIC metrics live during evaluation.
-        """
         gain    = channel_gains[user_id]
         sinr    = self.cfg.TX_POWER * gain / self.cfg.NOISE_POWER
         success = sinr >= sinr_threshold
@@ -372,17 +326,13 @@ class NOMADQNTrainer:
         metrics['noma_transmissions'] += 1
         metrics['total_energy']       += self.cfg.TX_POWER
 
-        # Track CIC metrics at sim level
         if paired_file is not None:
             metrics['cic_opportunities'] += 1
             if cache.is_hit(paired_file, update_stats=False):
                 metrics['cic_enabled_weak'] += 1
 
         hit = None
-        # FIX-2: call cache.request() for DQN in both train AND eval
         if hasattr(cache, 'request') and (is_dqn_train or is_dqn_eval):
-            # In eval mode: episode_done must always be False to prevent
-            # the model flushing pending_transitions mid-evaluation
             safe_episode_done = episode_done if is_dqn_train else False
             result = cache.request(
                 item=file_id,
@@ -394,15 +344,14 @@ class NOMADQNTrainer:
                 paired_file=paired_file,
                 paired_user=paired_user,
             )
-            if is_dqn_train or is_dqn_eval:
-                hit = result['hit']
-                if result.get('cic_enabled', False):
-                    metrics['cic_enabled_strong'] += 1
+            hit = result['hit']
+            if result.get('cic_enabled', False):
+                metrics['cic_enabled_strong'] += 1
 
         return hit
 
     # ========================================================================
-    # BATCH EPISODE RUNNER (used by evaluate_policy for baselines only)
+    # BATCH EPISODE RUNNER (baselines only)
     # ========================================================================
 
     def run_batch_episode(self, cache, seed: int, phase: str = 'eval') -> Dict:
@@ -493,10 +442,13 @@ class NOMADQNTrainer:
                     phase=phase, is_dqn_train=False, is_dqn_eval=False,
                 )
 
-        return self._compile_metrics(metrics, cache, phase)
+        # run_batch_episode: noma_transmissions = num_pairs (2 users each)
+        # so denominator must be total_noma*2 (BUG-E: keep original behaviour)
+        return self._compile_metrics(metrics, cache, phase,
+                                     single_user_per_noma=False)
 
     # ========================================================================
-    # NOMA PAIR HANDLER  (used by run_batch_episode)
+    # NOMA PAIR HANDLER (used by run_batch_episode)
     # ========================================================================
 
     def _process_noma_pair(
@@ -581,18 +533,29 @@ class NOMADQNTrainer:
 
     # ========================================================================
     # METRICS COMPILER
+    # BUG-E FIX: single_user_per_noma flag selects correct outage denominator
     # ========================================================================
 
-    def _compile_metrics(self, metrics: Dict, cache, phase: str) -> Dict:
-        total_req      = max(metrics['total_requests'],     1)
-        total_noma     = max(metrics['noma_transmissions'], 1)
-        total_noma_usr = max(total_noma * 2, 1)
-        total_sic      = max(metrics['sic_attempts'],       1)
+    def _compile_metrics(
+        self, metrics: Dict, cache, phase: str,
+        single_user_per_noma: bool = False
+    ) -> Dict:
+        total_req  = max(metrics['total_requests'],     1)
+        total_noma = max(metrics['noma_transmissions'], 1)
+        total_sic  = max(metrics['sic_attempts'],       1)
+
+        # BUG-E FIX:
+        #   run_episode()     : 1 user per NOMA call -> denominator = total_noma
+        #   run_batch_episode(): 2 users per NOMA pair -> denominator = total_noma*2
+        if single_user_per_noma:
+            outage_denom = max(total_noma, 1)
+        else:
+            outage_denom = max(total_noma * 2, 1)
 
         result = {
             'hit_rate':           metrics['cache_hits']     / total_req,
             'miss_rate':          metrics['cache_misses']   / total_req,
-            'outage_probability': metrics['outages']        / total_noma_usr,
+            'outage_probability': metrics['outages']        / outage_denom,
             'noma_success_rate':  metrics['noma_successes'] / total_noma,
             'sic_success_rate':   metrics['sic_successes']  / total_sic,
             'cic_benefit_rate': (
@@ -624,7 +587,6 @@ class NOMADQNTrainer:
         test_interval: int = 50,
         save_best: bool = True,
     ) -> Tuple['DQNCache', pd.DataFrame]:
-        """Train DQN cache with periodic testing."""
         if not HAS_DQN:
             raise ImportError("DQN not available")
 
@@ -666,9 +628,14 @@ class NOMADQNTrainer:
         return cache, pd.DataFrame(self.train_history)
 
     def _test_cache(self, cache: 'DQNCache', episode: int) -> Dict:
+        """
+        BUG-C FIX: use phase='eval' (not 'test') so DQN follows the
+        is_dqn_eval=True path with cache.request() instead of falling
+        into the baseline is_hit()-only path.
+        """
         cache.set_eval_mode(True)
         seed   = self.cfg.RANDOM_SEED + episode + 10000
-        result = self.run_episode(cache, seed, phase='test')
+        result = self.run_episode(cache, seed, phase='eval')   # BUG-C fix
         result['episode'] = episode
         cache.set_eval_mode(False)
         return result
@@ -736,9 +703,6 @@ class CachePolicyEvaluator:
         for run in range(num_runs):
             seed = self.cfg.RANDOM_SEED + 200000 + run
 
-            # FIX-1: DQN must use run_episode() so cache.request() is called
-            # and CIC/hit metrics are computed fresh each run.
-            # Baselines use run_batch_episode() (unchanged behaviour).
             if policy == 'dqn':
                 result = self.trainer.run_episode(cache, seed, phase='eval')
             else:
