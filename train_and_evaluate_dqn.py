@@ -1,281 +1,237 @@
 #!/usr/bin/env python3
 """
-DQN Training and Evaluation Script
+train_and_evaluate_dqn.py  (project root entry point)
 
-This script properly trains DQN cache before evaluation:
-1. Train for RL_TRAINING_EPISODES (50) episodes
-2. Switch to evaluation mode
-3. Evaluate on NUM_RUNS (100) test episodes
-4. Compare with baseline policies
+DQN Training and Evaluation Pipeline
+======================================
+End-to-end pipeline:
+  1. (Optional) --debug flag for a fast 2-3 min smoke test
+  2. Train DQN for RL_TRAINING_EPISODES (default 2000) episodes
+  3. Evaluate trained DQN vs TopK / LRU / LFU / Random on held-out data
+  4. Save results + plots to results/
+
+Fix history (2026):
+  CRITICAL-1 : Now imports NOMADQNTrainer / CachePolicyEvaluator from
+               stable_dqn_sim (was importing broken noma_caching_sim).
+  CRITICAL-2 : episode_done logic removed; stable_dqn_sim handles it
+               internally via req_remaining countdown.
+  HIGH-1     : Uses NOMADQNTrainer.create_dqn_cache() so ALL config
+               params (beta_frames, tau, hidden_dims, ...) are forwarded.
+  HIGH-2     : Evaluation uses CachePolicyEvaluator (run_batch_episode)
+               for a fair apples-to-apples comparison.
+  MEDIUM-1   : Plot functions imported from stable_dqn_sim.
+  LOW-1      : Docstring episode count corrected (50 -> 2000).
+
+Usage:
+    # Quick sanity check (~2-3 min on CPU):
+    python train_and_evaluate_dqn.py --debug
+
+    # Full run (~4-6 hrs on CPU, ~1 hr on GPU):
+    python train_and_evaluate_dqn.py
 
 Author: Cache-Aided NOMA Team
-Date: December 2025
+Date: December 2025  |  Revised: March 2026
 """
 
 import sys
+import os
 import time
-import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# Add src to path
-src_path = Path(__file__).parent.parent
+# -- path setup ---------------------------------------------------------------
+# This file lives at project root, so src/ is already one level down.
+src_path = Path(__file__).parent
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
+# -- imports from the FIXED simulator (CRITICAL-1 fix) ------------------------
 from src import config as cfg
-from src.caching import create_cache
-from src.simulation.noma_caching_sim import (
-    NOMACachingSimulator,
-    plot_comparison_results,
-    plot_dqn_training
+from src.simulation.stable_dqn_sim import (
+    NOMADQNTrainer,
+    CachePolicyEvaluator,
+    plot_training_curves,    # MEDIUM-1 fix: was plot_dqn_training
+    plot_policy_comparison,  # MEDIUM-1 fix: was plot_comparison_results
 )
 
 
-def train_dqn(cfg):
+# =============================================================================
+# PHASE 1 -- TRAINING
+# =============================================================================
+
+def train_dqn(verbose: bool = True):
     """
-    Train DQN cache with proper training workflow.
-    
+    Train DQN cache using NOMADQNTrainer.
+
+    CRITICAL-2 fix: episode_done is no longer computed or passed here.
+    NOMADQNTrainer.train() / run_episode() manage episode boundaries
+    internally via a req_remaining countdown.
+
+    HIGH-1 fix: NOMADQNTrainer.create_dqn_cache() forwards ALL config
+    parameters (hidden_dims, tau, gradient_clip, priority_beta_frames,
+    warm_up_steps, train_freq) -- none are silently dropped.
+
     Returns:
-        trained_cache: Trained DQN cache instance
-        training_df: DataFrame with training history
+        trained_cache : DQNCache (eval mode off; call set_eval_mode(True) to use)
+        train_df      : pd.DataFrame -- per-episode training metrics
+        test_df       : pd.DataFrame -- periodic test-phase metrics
     """
     print("\n" + "="*70)
     print("PHASE 1: DQN TRAINING")
     print("="*70)
-    print(f"Training for {cfg.RL_TRAINING_EPISODES} episodes...\n")
-    
-    # Create DQN cache
-    dqn_cache = create_cache(
-        'dqn',
-        capacity=cfg.CACHE_SIZE,
-        num_files=cfg.NUM_FILES,
-        num_users=cfg.NUM_USERS,
-        learning_rate=cfg.RL_LEARNING_RATE,
-        gamma=cfg.RL_GAMMA,
-        epsilon_start=cfg.RL_EPSILON_START,
-        epsilon_end=cfg.RL_EPSILON_END,
-        epsilon_decay_steps=cfg.RL_EPSILON_DECAY_STEPS,
-        batch_size=cfg.RL_BATCH_SIZE,
-        replay_buffer_size=cfg.RL_REPLAY_BUFFER_SIZE,
-        use_prioritized_replay=cfg.RL_USE_PRIORITIZED_REPLAY,
-        priority_alpha=cfg.RL_PRIORITY_ALPHA,
-        priority_beta_start=cfg.RL_PRIORITY_BETA_START,
-        priority_beta_end=cfg.RL_PRIORITY_BETA_END,
-        seed=cfg.RANDOM_SEED
+    print(f"  Episodes     : {cfg.RL_TRAINING_EPISODES}")
+    print(f"  Steps/episode: {cfg.RL_STEPS_PER_EPISODE:,}  "
+          f"(= {cfg.NUM_USERS} users x {cfg.REQUESTS_PER_USER} req)")
+    print(f"  Total steps  : {cfg.RL_TRAINING_STEPS:,}")
+    print(f"  eps decay    : {cfg.RL_EPSILON_START} -> {cfg.RL_EPSILON_END} "
+          f"over {cfg.RL_EPSILON_DECAY_STEPS:,} steps\n")
+
+    trainer = NOMADQNTrainer(cfg, verbose=verbose)
+    trained_cache, train_df = trainer.train(
+        num_episodes=cfg.RL_TRAINING_EPISODES,
+        test_interval=50,
+        save_best=True,
     )
-    
-    simulator = NOMACachingSimulator(cfg)
-    training_history = []
-    
-    # Training loop
-    for episode in range(cfg.RL_TRAINING_EPISODES):
-        seed = cfg.RANDOM_SEED + episode + 1000  # Different seeds for training
-        episode_done = (episode == cfg.RL_TRAINING_EPISODES - 1)
-        
-        # Run training episode
-        results = simulator.run_single_episode(dqn_cache, seed, episode_done)
-        
-        # Get DQN stats
-        dqn_stats = dqn_cache.get_stats()
-        results.update(dqn_stats)
-        results['episode'] = episode
-        
-        training_history.append(results)
-        
-        # Print progress
-        if (episode + 1) % 10 == 0 or episode == 0:
-            print(f"  Episode {episode+1:3d}/{cfg.RL_TRAINING_EPISODES}: "
-                  f"Hit={results['hit_rate']:.3f}, "
-                  f"CIC={results['cic_benefit_rate']:.3f}, "
-                  f"ε={dqn_stats['epsilon']:.3f}, "
-                  f"Loss={dqn_stats.get('avg_loss', 0):.4f}")
-    
-    print("\n✅ Training complete!")
-    print(f"   Final hit rate: {training_history[-1]['hit_rate']:.3f}")
-    print(f"   Final CIC benefit: {training_history[-1]['cic_benefit_rate']:.3f}")
-    print(f"   Final epsilon: {dqn_stats['epsilon']:.3f}")
-    
-    return dqn_cache, pd.DataFrame(training_history)
+    test_df = pd.DataFrame(trainer.test_history)
+    return trained_cache, train_df, test_df
 
 
-def evaluate_dqn(dqn_cache, cfg, num_runs=None):
+# =============================================================================
+# PHASE 2 -- EVALUATION
+# =============================================================================
+
+def evaluate_all(trained_cache, verbose: bool = True):
     """
-    Evaluate trained DQN cache.
-    
+    Evaluate DQN vs all baseline policies.
+
+    HIGH-2 fix: uses CachePolicyEvaluator which calls run_batch_episode()
+    for every policy -- identical NOMA pairing for a fair comparison.
+
+    Returns:
+        pd.DataFrame -- combined results across all policies & runs
+    """
+    print("\n" + "="*70)
+    print("PHASE 2: POLICY COMPARISON")
+    print("="*70)
+    print(f"  Runs per policy: {cfg.NUM_RUNS}")
+    print(f"  Eval requests  : {cfg.RL_EVAL_REQUESTS}\n")
+
+    evaluator = CachePolicyEvaluator(cfg, verbose=verbose)
+    combined_df = evaluator.compare_all_policies(
+        num_runs=cfg.NUM_RUNS,
+        pretrained_dqn=trained_cache,
+    )
+    return combined_df
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main(debug: bool = False):
+    """
+    Full pipeline: validate config -> train -> evaluate -> save -> plot.
+
     Args:
-        dqn_cache: Trained DQN cache instance
-        cfg: Configuration
-        num_runs: Number of evaluation runs (default: cfg.NUM_RUNS)
-    
-    Returns:
-        DataFrame with evaluation results
+        debug : If True, calls set_debug_config() for a fast smoke test
+                (~2-3 min on CPU).  Use this FIRST to confirm the
+                pipeline works before the full 20M-step run.
     """
-    if num_runs is None:
-        num_runs = cfg.NUM_RUNS
-    
-    print("\n" + "="*70)
-    print("PHASE 2: DQN EVALUATION")
-    print("="*70)
-    print(f"Evaluating for {num_runs} episodes...\n")
-    
-    # Switch to evaluation mode (no exploration, no training)
-    dqn_cache.set_eval_mode(True)
-    
-    simulator = NOMACachingSimulator(cfg)
-    eval_results = []
-    
-    for run in range(num_runs):
-        # Use different seed range for evaluation
-        seed = cfg.RANDOM_SEED + 50000 + run
-        
-        # Run evaluation episode
-        results = simulator.run_single_episode(dqn_cache, seed, episode_done=False)
-        results['policy'] = 'dqn'
-        results['run'] = run
-        results['seed'] = seed
-        
-        eval_results.append(results)
-        
-        # Print progress
-        if (run + 1) % 20 == 0 or run == 0:
-            print(f"  Run {run+1:3d}/{num_runs}: "
-                  f"Hit={results['hit_rate']:.3f}, "
-                  f"Outage={results['outage_probability']:.3f}, "
-                  f"CIC={results['cic_benefit_rate']:.3f}")
-    
-    return pd.DataFrame(eval_results)
+    if debug:
+        print("\n[DEBUG MODE] Using small-scale config for smoke test")
+        cfg.set_debug_config()
 
-
-def evaluate_baselines(cfg, num_runs=None):
-    """
-    Evaluate baseline policies for comparison.
-    
-    Returns:
-        DataFrame with baseline results
-    """
-    if num_runs is None:
-        num_runs = cfg.NUM_RUNS
-    
-    print("\n" + "="*70)
-    print("PHASE 3: BASELINE COMPARISON")
-    print("="*70)
-    
-    policies = ['topk', 'lru', 'lfu', 'random']
-    all_results = []
-    
-    for policy in policies:
-        print(f"\nTesting {policy.upper()} policy...")
-        
-        cache = create_cache(policy, capacity=cfg.CACHE_SIZE)
-        simulator = NOMACachingSimulator(cfg)
-        
-        for run in range(num_runs):
-            seed = cfg.RANDOM_SEED + 50000 + run  # Same seeds as DQN eval
-            
-            results = simulator.run_single_episode(cache, seed, episode_done=False)
-            results['policy'] = policy
-            results['run'] = run
-            results['seed'] = seed
-            
-            all_results.append(results)
-        
-        # Print summary for this policy
-        policy_results = [r for r in all_results if r['policy'] == policy]
-        avg_hit = np.mean([r['hit_rate'] for r in policy_results])
-        avg_cic = np.mean([r['cic_benefit_rate'] for r in policy_results])
-        avg_outage = np.mean([r['outage_probability'] for r in policy_results])
-        
-        print(f"  {policy.upper()}: Hit={avg_hit:.3f}, CIC={avg_cic:.3f}, Outage={avg_outage:.3f}")
-    
-    return pd.DataFrame(all_results)
-
-
-def main():
-    """
-    Main execution: Train DQN, then compare with baselines.
-    """
     print("\n" + "#"*70)
     print("#" + " "*10 + "DQN TRAINING & EVALUATION PIPELINE" + " "*14 + "#")
     print("#"*70)
-    
-    print("\nConfiguration:")
-    print(f"  Cache size: {cfg.CACHE_SIZE}")
-    print(f"  Num files: {cfg.NUM_FILES}")
-    print(f"  Num users: {cfg.NUM_USERS}")
-    print(f"  Training episodes: {cfg.RL_TRAINING_EPISODES}")
-    print(f"  Evaluation runs: {cfg.NUM_RUNS}")
-    print(f"  CIC reward: {cfg.RL_REWARD_CIC_ENABLED}")
-    
-    t0 = time.time()
-    
-    # Phase 1: Train DQN
-    dqn_cache, training_df = train_dqn(cfg)
-    
-    # Save training history
-    import os
-    os.makedirs('results', exist_ok=True)
-    training_df.to_csv('results/dqn_training_history.csv', index=False)
-    print("\n✅ Training history saved to results/dqn_training_history.csv")
-    
-    # Plot training curves
-    plot_dqn_training(training_df, 'results/dqn_training_curves.png')
-    
-    # Save trained model
+    print(f"\n  Cache size : {cfg.CACHE_SIZE}")
+    print(f"  Num files  : {cfg.NUM_FILES}")
+    print(f"  Num users  : {cfg.NUM_USERS}")
+    print(f"  Episodes   : {cfg.RL_TRAINING_EPISODES}")
+    print(f"  Eval runs  : {cfg.NUM_RUNS}")
+    print(f"  CIC reward : {cfg.RL_REWARD_CIC_ENABLED}  (correct = 2.0)")
+
+    # -- validate config BEFORE spending time training -----------------------
+    print()
+    if not cfg.validate_config():
+        print("\n[ERROR] Config validation failed. Fix config.py before running.")
+        sys.exit(1)
+
+    os.makedirs('results',     exist_ok=True)
     os.makedirs('checkpoints', exist_ok=True)
-    dqn_cache.save_model('checkpoints/dqn_trained.pth')
-    print("✅ Trained model saved to checkpoints/dqn_trained.pth")
-    
-    # Phase 2: Evaluate DQN
-    dqn_eval_df = evaluate_dqn(dqn_cache, cfg)
-    
-    # Phase 3: Evaluate baselines
-    baseline_df = evaluate_baselines(cfg)
-    
-    # Combine results
-    all_results_df = pd.concat([dqn_eval_df, baseline_df], ignore_index=True)
-    
-    # Aggregate statistics
+
+    t0 = time.time()
+
+    # -- Phase 1: Train -------------------------------------------------------
+    trained_cache, train_df, test_df = train_dqn()
+
+    train_df.to_csv('results/dqn_training_history.csv', index=False)
+    print("\n[OK] Training history  -> results/dqn_training_history.csv")
+    if len(test_df) > 0:
+        test_df.to_csv('results/dqn_test_history.csv', index=False)
+        print("[OK] Test history      -> results/dqn_test_history.csv")
+
+    plot_training_curves(
+        train_df, test_df,
+        save_path='results/dqn_training_curves.png',
+    )
+    print("[OK] Training curves   -> results/dqn_training_curves.png")
+
+    trained_cache.save_model('checkpoints/dqn_trained.pth')
+    print("[OK] Trained model     -> checkpoints/dqn_trained.pth")
+
+    # -- Phase 2: Evaluate ----------------------------------------------------
+    comparison_df = evaluate_all(trained_cache)
+
+    comparison_df.to_csv('results/comparison_results.csv', index=False)
+    print("\n[OK] Comparison data   -> results/comparison_results.csv")
+
+    plot_policy_comparison(
+        comparison_df,
+        save_path='results/comparison_plots.png',
+    )
+    print("[OK] Comparison plots  -> results/comparison_plots.png")
+
+    # -- Summary --------------------------------------------------------------
     print("\n" + "="*70)
-    print("FINAL RESULTS SUMMARY")
+    print("FINAL SUMMARY")
     print("="*70 + "\n")
-    
-    summary = all_results_df.groupby('policy').agg({
-        'hit_rate': ['mean', 'std'],
-        'outage_probability': ['mean', 'std'],
-        'cic_benefit_rate': ['mean', 'std'],
-        'spectral_efficiency': ['mean', 'std']
+
+    summary = comparison_df.groupby('policy').agg({
+        'hit_rate':            ['mean', 'std'],
+        'outage_probability':  ['mean', 'std'],
+        'cic_benefit_rate':    ['mean', 'std'],
+        'spectral_efficiency': ['mean', 'std'],
     }).round(4)
-    
     print(summary)
-    
-    # Highlight key comparisons
+
     print("\n" + "-"*70)
     print("KEY FINDINGS:")
     print("-"*70)
-    
-    policies = ['dqn', 'lru', 'lfu', 'topk']
-    for policy in policies:
-        policy_data = all_results_df[all_results_df['policy'] == policy]
-        if len(policy_data) > 0:
-            hit = policy_data['hit_rate'].mean()
-            cic = policy_data['cic_benefit_rate'].mean()
-            outage = policy_data['outage_probability'].mean()
-            print(f"{policy.upper():8s}: Hit={hit:.1%}, CIC={cic:.1%}, Outage={outage:.1%}")
-    
-    # Save results
-    all_results_df.to_csv('results/comparison_results.csv', index=False)
-    print("\n✅ Results saved to results/comparison_results.csv")
-    
-    # Plot comparison
-    plot_comparison_results(all_results_df, 'results/comparison_plots.png')
-    
-    print(f"\n⏱️  Total time: {time.time() - t0:.1f}s")
-    
+    for policy in ['dqn', 'topk', 'lru', 'lfu', 'random']:
+        pdata = comparison_df[comparison_df['policy'] == policy]
+        if len(pdata) == 0:
+            continue
+        hit    = pdata['hit_rate'].mean()
+        cic    = pdata['cic_benefit_rate'].mean()
+        outage = pdata['outage_probability'].mean()
+        tag    = "  <-- DQN" if policy == 'dqn' else ""
+        print(f"  {policy.upper():8s}: Hit={hit:.1%}, CIC={cic:.1%}, Outage={outage:.1%}{tag}")
+
+    elapsed = time.time() - t0
+    print(f"\n  Total time: {elapsed:.0f}s ({elapsed/60:.1f} min)")
+
     print("\n" + "#"*70)
-    print("#" + " "*22 + "COMPLETE" + " "*28 + "#")
+    print("#" + " "*28 + "DONE" + " "*26 + "#")
     print("#"*70 + "\n")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate DQN cache for Cache-Aided NOMA")
+    parser.add_argument(
+        '--debug', action='store_true',
+        help='Run set_debug_config() for a fast 2-3 min smoke test')
+    args = parser.parse_args()
+    main(debug=args.debug)
