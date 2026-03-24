@@ -101,93 +101,87 @@ OUTAGE_SINR_MARGIN = 2.0
 
 
 # ============================================================================
-# STABLE DQN CACHE PARAMETERS
+# STABLE DQN CACHE PARAMETERS (v2 — Binary-Action Redesign)
 # ============================================================================
 
 # ------------------------------
 # Training Configuration
-# BUG-5 FIX: Steps per episode = NUM_USERS * REQUESTS_PER_USER = 10,000
+# v2: binary action space → faster convergence → fewer episodes needed
+# Steps per episode = NUM_USERS * REQUESTS_PER_USER = 10,000
 # ------------------------------
-RL_TRAINING_EPISODES   = 2000        # number of training episodes
-RL_STEPS_PER_EPISODE   = 10_000      # BUG-5 FIX: NUM_USERS(200) x REQ_PER_USER(50)
-RL_TRAINING_STEPS      = 20_000_000  # BUG-5 FIX: 2000 x 10,000
+RL_TRAINING_EPISODES   = 500          # v2: was 2000 (converges faster)
+RL_STEPS_PER_EPISODE   = 10_000       # NUM_USERS(200) x REQ_PER_USER(50)
+RL_TRAINING_STEPS      = 5_000_000    # 500 x 10,000
 
 # ------------------------------
 # Epsilon-Greedy Exploration
-# BUG-5 FIX: Decay steps corrected to 50% of actual total training steps
+# v2: faster decay (binary action → less exploration needed)
 # ------------------------------
 RL_EPSILON_START        = 1.0
 RL_EPSILON_END          = 0.01
-RL_EPSILON_DECAY_STEPS  = 10_000_000  # BUG-5 FIX: 50% of 20M real steps
+RL_EPSILON_DECAY_STEPS  = 2_000_000   # v2: 40% of total (was 50%)
 RL_EVAL_EPSILON         = 0.0
 
 # ------------------------------
 # Neural Network Architecture
+# v2: smaller network for binary action + compact state
 # ------------------------------
 RL_USE_NEURAL_NETWORK = True
-RL_HIDDEN_DIMS = [128, 128]   # Dueling DQN shared feature layers
+RL_HIDDEN_DIMS = [64, 32]   # v2: was [128,128] (much simpler problem now)
 
 # ------------------------------
 # Learning Hyperparameters
+# v2: higher LR for faster convergence on simpler problem
 # ------------------------------
-RL_LEARNING_RATE      = 0.0001   # Adam optimizer
+RL_LEARNING_RATE      = 0.001    # v2: was 0.0001 (10x faster)
 RL_GAMMA              = 0.99     # Discount factor
 RL_BATCH_SIZE         = 64
 
-# ROOT-1 FIX: Buffer was 50,000 (only 5 episodes worth).
-# Each episode writes 10,000 steps → 20% of buffer overwritten/episode.
-# After just 5 episodes the entire buffer was fresh data → catastrophic
-# forgetting. New size = 500,000 = 50 episodes worth of experience.
-# Rule of thumb: buffer >= 10-50x steps_per_episode.
-RL_REPLAY_BUFFER_SIZE = 500_000   # ROOT-1 FIX: was 50,000
+# v2: smaller buffer needed (simpler transitions, faster convergence)
+RL_REPLAY_BUFFER_SIZE = 50_000   # v2: was 500K (5x steps_per_ep is enough)
 
 # ------------------------------
 # Training Stability
 # ------------------------------
 RL_GRADIENT_CLIP      = 10.0   # Max norm for gradient clipping
-RL_TAU                = 0.005  # Soft target network update rate (every step)
+RL_TAU                = 0.005  # Soft target network update rate
 RL_TARGET_UPDATE_FREQ = 1000   # DEPRECATED: kept for backward compat
 
-# ROOT-4 FIX: train_freq was 4 → 2,500 gradient steps/episode on a 50K buffer
-# = buffer sampled ~5x per episode → overfitting to most recent data.
-# New: 1,000 gradient steps/episode on 500K buffer = sampled 0.2x/episode.
-RL_TRAIN_FREQUENCY    = 10    # ROOT-4 FIX: was 4
+# v2: train more frequently since transitions are simpler & informative
+RL_TRAIN_FREQUENCY    = 4      # v2: was 10 (binary action = cleaner signal)
 
 # ------------------------------
 # Warm-Up Period
-# ROOT-2 FIX: Was None → auto-resolves to max(10*64, 1000) = 1,000.
-# Warm-up ended after 10% of episode 1 with zero-diversity buffer.
-# New: 15,000 = 1.5 full episodes of random exploration before any
-# gradient step. Ensures the buffer has diverse (s,a,r,s') transitions
-# from multiple random policies before learning begins.
+# v2: shorter warm-up since buffer fills with useful data faster
 # ------------------------------
-RL_WARM_UP_STEPS = 15_000    # ROOT-2 FIX: was None (→ 1,000)
+RL_WARM_UP_STEPS = 2_000     # v2: was 15K (binary action fills buffer faster)
 
 # ------------------------------
-# Reward Function Parameters
-# BUG-7 FIX: RL_REWARD_CIC_ENABLED 7.0 → 2.0
+# Reward Function Parameters (v2 — immediate, caching-quality focused)
+# Old deferred-reward params kept for backward compat but UNUSED in v2.
+# Actual rewards are computed inside DQNCache._compute_reward().
 # ------------------------------
-RL_REWARD_CACHE_HIT          =  10.0
-RL_REWARD_CIC_ENABLED        =   2.0  # BUG-7 FIX: was 7.0
-RL_REWARD_CACHE_MISS_SUCCESS =  -1.0
-RL_REWARD_NOMA_FAILURE       =  -5.0
-RL_REWARD_OUTAGE             = -10.0
-RL_REWARD_POOR_BER           =  -2.0
-RL_REWARD_GOOD_BER           =   1.0
+RL_REWARD_CACHE_HIT          =  2.0   # v2: used as reference (actual in DQNCache)
+RL_REWARD_CIC_ENABLED        =  1.5   # v2: CIC bonus
+RL_REWARD_CACHE_MISS_SUCCESS =  0.0   # v2: DEPRECATED (not used)
+RL_REWARD_NOMA_FAILURE       =  0.0   # v2: DEPRECATED (agent can't control NOMA)
+RL_REWARD_OUTAGE             =  0.0   # v2: DEPRECATED (agent can't control outage)
+RL_REWARD_POOR_BER           =  0.0   # v2: DEPRECATED
+RL_REWARD_GOOD_BER           =  0.0   # v2: DEPRECATED
 
-# BER thresholds for reward shaping
+# BER thresholds (kept for backward compat)
 RL_BER_THRESHOLD_GOOD = 1e-4
 RL_BER_THRESHOLD_POOR = 1e-2
 
 # ------------------------------
 # Prioritized Experience Replay (Schaul et al., ICLR 2016)
-# BUG-CONFIG-3 FIX: RL_PRIORITY_BETA_FRAMES 100K → 20M
+# v2: beta frames scaled to new total training steps
 # ------------------------------
 RL_USE_PRIORITIZED_REPLAY  = True
 RL_PRIORITY_ALPHA          = 0.6
 RL_PRIORITY_BETA_START     = 0.4
 RL_PRIORITY_BETA_END       = 1.0
-RL_PRIORITY_BETA_FRAMES    = 20_000_000  # BUG-CONFIG-3 FIX: was 100,000
+RL_PRIORITY_BETA_FRAMES    = 5_000_000  # v2: = RL_TRAINING_STEPS
 
 # ------------------------------
 # Popularity Tracking
@@ -199,6 +193,12 @@ RL_POPULARITY_DECAY = 0.9
 # ------------------------------
 RL_EVAL_REQUESTS       = 5000
 RL_SEPARATE_TRAIN_EVAL = True
+
+# ------------------------------
+# Episode Management (v2 NEW)
+# ------------------------------
+RL_RESET_CACHE_PER_EPISODE  = True   # v2: reset cache at start of each episode
+RL_RESET_POPULARITY_PER_EP  = False  # keep popularity to accelerate learning
 
 # ------------------------------
 # Checkpointing & Logging
@@ -223,10 +223,10 @@ COMPARE_POLICIES = ["topk", "lru", "lfu", "stable_dqn"]
 
 def set_debug_config():
     """
-    Tiny-scale config for rapid convergence verification (~2-3 min on CPU).
+    Tiny-scale config for rapid convergence verification (~1-2 min on CPU).
 
-    Use this FIRST after any code change. DQN hit rate should clearly
-    rise above TopK within ~10 episodes if everything is working.
+    v2: with binary action space, DQN should clearly rise above random
+    and approach TopK within ~20 episodes.
 
     Scale:
         NUM_FILES=100, CACHE_SIZE=10 (10%), NUM_USERS=20, REQ_PER_USER=20
@@ -237,7 +237,7 @@ def set_debug_config():
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
     global RL_REPLAY_BUFFER_SIZE, RL_WARM_UP_STEPS, RL_PRIORITY_BETA_FRAMES
-    global RL_TRAIN_FREQUENCY
+    global RL_TRAIN_FREQUENCY, RL_HIDDEN_DIMS, RL_LEARNING_RATE
 
     NUM_FILES          = 100
     CACHE_SIZE         = 10
@@ -251,25 +251,26 @@ def set_debug_config():
     RL_EPSILON_DECAY_STEPS  = 50 * _steps_per_ep // 2  # 10,000
     NUM_RUNS                = 5
     RL_EVAL_REQUESTS        = 500
-    # ROOT-1/2/4 ratios preserved at debug scale:
-    RL_REPLAY_BUFFER_SIZE   = 20_000   # 50x steps_per_ep
-    RL_WARM_UP_STEPS        = 600      # 1.5x steps_per_ep
-    RL_TRAIN_FREQUENCY      = 10
+    RL_REPLAY_BUFFER_SIZE   = 10_000    # v2: 25x steps_per_ep
+    RL_WARM_UP_STEPS        = 400       # v2: 1x steps_per_ep
+    RL_TRAIN_FREQUENCY      = 4
     RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
+    RL_HIDDEN_DIMS          = [32, 16]  # v2: tiny network for debug
+    RL_LEARNING_RATE        = 0.001
 
-    print("[DEBUG] Config enabled")
+    print("[DEBUG v2] Config enabled")
     print(f"  Catalog   : {NUM_FILES} files, cache={CACHE_SIZE} ({CACHE_SIZE/NUM_FILES*100:.0f}%)")
     print(f"  Users     : {NUM_USERS} x {REQUESTS_PER_USER} req = {_steps_per_ep} steps/ep")
     print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE} = {RL_TRAINING_STEPS:,} total")
-    print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,} (50x steps/ep)")
-    print(f"  Warm-up   : {RL_WARM_UP_STEPS} steps (1.5x steps/ep)")
-    print(f"  Expected  : ~2-3 minutes on CPU")
+    print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,}")
+    print(f"  Warm-up   : {RL_WARM_UP_STEPS} steps")
+    print(f"  Expected  : ~1-2 minutes on CPU")
 
 
 def set_quick_test_config():
     """
-    Quick test configuration (~15-20 minutes on CPU).
-    BUG-CONFIG-1 FIX + ROOT-1/2/4 ratios applied.
+    Quick test configuration (~5-10 minutes on CPU).
+    v2: faster convergence with binary action space.
     """
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
@@ -283,21 +284,21 @@ def set_quick_test_config():
     RL_EPSILON_DECAY_STEPS  = 100 * _steps_per_ep // 2
     NUM_RUNS                = 10
     RL_EVAL_REQUESTS        = 2000
-    RL_REPLAY_BUFFER_SIZE   = 50 * _steps_per_ep   # 500,000
-    RL_WARM_UP_STEPS        = int(1.5 * _steps_per_ep)  # 15,000
-    RL_TRAIN_FREQUENCY      = 10
+    RL_REPLAY_BUFFER_SIZE   = max(5 * _steps_per_ep, 50_000)
+    RL_WARM_UP_STEPS        = _steps_per_ep  # 1x steps_per_ep
+    RL_TRAIN_FREQUENCY      = 4
     RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
 
-    print("[QUICK TEST] Config enabled")
+    print("[QUICK TEST v2] Config enabled")
     print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE:,} = {RL_TRAINING_STEPS:,} total")
     print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,}")
-    print(f"  Expected  : ~15-20 minutes on CPU")
+    print(f"  Expected  : ~5-10 minutes on CPU")
 
 
 def set_full_experiment_config():
     """
     Full experiment configuration for paper results.
-    BUG-CONFIG-2 FIX + ROOT-1/2/4 ratios applied.
+    v2: binary action space converges faster, 500 episodes enough.
     """
     global RL_TRAINING_EPISODES, RL_STEPS_PER_EPISODE, RL_TRAINING_STEPS
     global RL_EPSILON_DECAY_STEPS, NUM_RUNS, RL_EVAL_REQUESTS
@@ -305,21 +306,21 @@ def set_full_experiment_config():
     global RL_TRAIN_FREQUENCY
 
     _steps_per_ep = NUM_USERS * REQUESTS_PER_USER
-    RL_TRAINING_EPISODES    = 2000
+    RL_TRAINING_EPISODES    = 500
     RL_STEPS_PER_EPISODE    = _steps_per_ep
-    RL_TRAINING_STEPS       = 2000 * _steps_per_ep
-    RL_EPSILON_DECAY_STEPS  = 2000 * _steps_per_ep // 2
+    RL_TRAINING_STEPS       = 500 * _steps_per_ep
+    RL_EPSILON_DECAY_STEPS  = 500 * _steps_per_ep // 2
     NUM_RUNS                = 100
     RL_EVAL_REQUESTS        = 5000
-    RL_REPLAY_BUFFER_SIZE   = 50 * _steps_per_ep   # 500,000
-    RL_WARM_UP_STEPS        = int(1.5 * _steps_per_ep)  # 15,000
-    RL_TRAIN_FREQUENCY      = 10
+    RL_REPLAY_BUFFER_SIZE   = max(5 * _steps_per_ep, 50_000)
+    RL_WARM_UP_STEPS        = _steps_per_ep
+    RL_TRAIN_FREQUENCY      = 4
     RL_PRIORITY_BETA_FRAMES = RL_TRAINING_STEPS
 
-    print("[FULL EXPERIMENT] Config enabled")
+    print("[FULL EXPERIMENT v2] Config enabled")
     print(f"  Training  : {RL_TRAINING_EPISODES} ep x {RL_STEPS_PER_EPISODE:,} = {RL_TRAINING_STEPS:,} total")
     print(f"  Buffer    : {RL_REPLAY_BUFFER_SIZE:,}")
-    print(f"  Expected  : ~4-6 hrs CPU, ~1 hr GPU")
+    print(f"  Expected  : ~1-2 hrs CPU, ~15 min GPU")
 
 
 def set_aggressive_learning_config():
@@ -446,14 +447,6 @@ def validate_config():
             issues.append(f"RL_PRIORITY_BETA_END should be 1.0")
     if not (0 < RL_TAU < 1):
         issues.append(f"RL_TAU must be in (0,1)")
-    if RL_REWARD_CIC_ENABLED >= RL_REWARD_CACHE_HIT:
-        issues.append(
-            f"RL_REWARD_CIC_ENABLED ({RL_REWARD_CIC_ENABLED}) must be < "
-            f"RL_REWARD_CACHE_HIT ({RL_REWARD_CACHE_HIT})")
-    if RL_REWARD_CIC_ENABLED <= RL_REWARD_NOMA_FAILURE:
-        issues.append(
-            f"RL_REWARD_CIC_ENABLED ({RL_REWARD_CIC_ENABLED}) must be > "
-            f"RL_REWARD_NOMA_FAILURE ({RL_REWARD_NOMA_FAILURE})")
 
     if issues:
         print("[WARN] Configuration Issues:")

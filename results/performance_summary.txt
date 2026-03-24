@@ -41,10 +41,10 @@ NO-CACHE:
   Energy Efficiency: 2.80 bits/J
 
 DQN (trained):
-  Sum-Rate: 16.9123 bps/Hz
-  Outage Prob: 0.016000
-  Cache Hit Rate: 0.5990
-  Fairness: 0.9259
-  Energy Efficiency: 13.21 bits/J
+  Sum-Rate: 18.1748 bps/Hz
+  Outage Prob: 0.006000
+  Cache Hit Rate: 0.7165
+  Fairness: 0.9570
+  Energy Efficiency: 18.66 bits/J
 
 ======================================================================

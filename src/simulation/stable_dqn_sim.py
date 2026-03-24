@@ -274,8 +274,10 @@ class NOMADQNTrainer:
                 metrics['cache_misses'] += 1
 
             else:
-                should_update = (phase == 'train')
-                hit = cache.is_hit(file_id, update_stats=should_update)
+                # v2 FIX: Baseline policies (LRU, LFU, Random) MUST update their
+                # cache contents dynamically even in evaluation mode, otherwise
+                # they stay empty and get 0% hit rate.
+                hit = cache.is_hit(file_id, update_stats=True)
                 if hit:
                     metrics['cache_hits']       += 1
                     metrics['total_throughput'] += self.cfg.CACHE_DELIVERY_RATE
@@ -608,6 +610,15 @@ class NOMADQNTrainer:
 
         for episode in range(num_episodes):
             seed = self.cfg.RANDOM_SEED + episode
+
+            # v2 FIX (ISSUE-6): Reset cache at start of each episode
+            # so the agent faces the full caching problem fresh.
+            # Model weights are preserved — only cache contents reset.
+            if getattr(self.cfg, 'RL_RESET_CACHE_PER_EPISODE', True):
+                cache.clear()
+                if getattr(self.cfg, 'RL_RESET_POPULARITY_PER_EP', False):
+                    cache.reset_popularity()
+
             result = self.run_episode(cache, seed, phase='train')
             result['episode'] = episode
             self.train_history.append(result)
@@ -713,10 +724,13 @@ class CachePolicyEvaluator:
         for run in range(num_runs):
             seed = self.cfg.RANDOM_SEED + 200000 + run
 
+            # v2 FIX: ALL policies (including DQN and baselines) MUST use the
+            # sequential run_episode() path for fair comparison. run_batch_episode()
+            # is a static snapshot that breaks dynamic caching policies.
             if policy == 'dqn':
-                result = self.trainer.run_episode(cache, seed, phase='eval')
-            else:
-                result = self.trainer.run_batch_episode(cache, seed, phase='eval')
+                cache.clear()  # Fresh cache for each eval run
+                
+            result = self.trainer.run_episode(cache, seed, phase='eval')
 
             result['policy'] = policy
             result['run']    = run

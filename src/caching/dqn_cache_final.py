@@ -1,41 +1,42 @@
 """
 src/caching/dqn_cache_final.py
 
-NOMA-AWARE DEEP Q-NETWORK CACHE
-===============================
+NOMA-AWARE DEEP Q-NETWORK CACHE  (v2 — Binary-Action Redesign)
+===============================================================
 
-Implementation based on:
+Complete redesign of the DQN cache to fix fundamental learning issues:
+
+1. BINARY ACTION SPACE: action ∈ {0=skip, 1=cache}
+   - When caching + cache full → evict least-popular slot (heuristic)
+   - Reduces action space from 200 to 2 → tractable learning
+
+2. COMPACT STATE VECTOR (~15 dims instead of 406):
+   - Requested file popularity rank (normalized)
+   - Requested file recent frequency
+   - Whether file already cached
+   - Cache occupancy
+   - Mean/min popularity of cached files
+   - CIC potential
+   - Channel & NOMA statistics
+
+3. IMMEDIATE REWARDS (no deferred credit assignment):
+   - Based on caching decision quality relative to file popularity
+   - Cache hits, CIC enablement, popularity-aware eviction quality
+
+4. NO pending_transitions — reward is computed immediately
+
+References:
 - IEEE DeepChunk (2019): Deep Q-Learning for Chunk-based Caching
-- RLCaR: Reinforcement Learning Cache Replacement
 - Wang et al. (2016): Dueling DQN architecture
 - Schaul et al. (2016): Prioritized Experience Replay
 
-2026 Bug Fix Log:
-- BUG-1  (CRITICAL): Replaced last_state/last_action pattern with
-  pending_transitions dict for correct deferred reward assignment.
-- BUG-3  (CRITICAL): EMA popularity decays ALL files every step.
-- BUG-4  (MODERATE): O(N^2) _get_state_vector fixed to O(N).
-- BUG-9  (MODERATE): populate() clears pending_transitions.
-- BUG-12 (MODERATE): save/load persists pending_transitions.
-- FIX-3  (HIGH): Reward redesign — outage removed; CIC +2->+3;
-  miss+success neutral (0.0).
-- BUG-DQN-2 (CRITICAL): popularity NaN guard on float32 underflow.
-- BUG-DQN-4 (MODERATE): empty-slot fill uses neutral reward 0.0.
-- DQN-A  (CRITICAL): _update_counters() moved BEFORE
-  _learn_from_request() so all state vectors see fresh LRU/LFU
-  counters instead of one-step-lagged values.
-- DQN-J  (MODERATE): popularity bump moved BEFORE
-  _learn_from_request() so state features reflect current request.
-- DQN-I  (MODERATE): clear() now resets cumulative_reward to 0.0
-  to prevent reward accumulator carry-over between eval runs.
-
 Author: Cache-Aided NOMA Team
-Date: December 2025 | Revised: March 2026
+Date: March 2026 (v2 redesign)
 """
 
 import numpy as np
 import random
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 from typing import Dict, List, Tuple, Optional, Set, Iterable
 import pickle
 
@@ -58,16 +59,18 @@ from .cache_base import CacheBase
 
 
 # ============================================================================
-# DUELING DQN NETWORK
+# DUELING DQN NETWORK (smaller for binary action space)
 # ============================================================================
 
 class DuelingDQN(nn.Module):
     """
     Dueling DQN (Wang et al., ICML 2016).
     Q(s,a) = V(s) + [A(s,a) - mean_a A(s,a)]
+
+    Compact network for binary action space.
     """
     def __init__(self, state_dim: int, action_dim: int,
-                 hidden_dims: List[int] = [128, 64]):
+                 hidden_dims: List[int] = [64, 32]):
         super().__init__()
         self.feature_layers = nn.ModuleList()
         prev_dim = state_dim
@@ -160,40 +163,35 @@ class PrioritizedReplayBuffer:
 
 
 # ============================================================================
-# NOMA-AWARE DQN CACHE
+# NOMA-AWARE DQN CACHE (v2 — Binary Action)
 # ============================================================================
 
 class DQNCache(CacheBase):
     """
-    Deep Q-Network Cache for Cache-Aided NOMA.
+    Deep Q-Network Cache for Cache-Aided NOMA (v2 redesign).
 
     MDP:
-      State  : LRU + LFU counters (per slot) + 6 global features
-      Action : which slot to evict (0 .. capacity-1)
-      Reward : deferred via pending_transitions (see _learn_from_request)
+      State  : compact ~15-dim vector (file popularity, cache state, NOMA stats)
+      Action : binary {0=skip, 1=cache this file}
+      Reward : immediate, based on caching decision quality
 
-    Reward hierarchy (FIX-3):
-      +10  cache hit on evicted file
-      + 3  miss + CIC enabled
-      +  0  miss + NOMA success (neutral)
-      - 5  miss + NOMA failure
-
-    Call ordering in request() (critical for correct state vectors):
-      1. is_hit()                  — check cache, record stat
-      2. build result dict         — NOMA flags
-      3. update channel/NOMA logs  — history deques
-      4. _update_counters()        — MUST be before step 5 & 6
-      5. popularity update         — MUST be before step 6
-      6. _learn_from_request()     — sees fresh counters + popularity
+    Key design decisions:
+      - Binary action makes learning tractable (2 actions instead of 200)
+      - When action=1 and cache is full, evict the least-popular cached file
+      - Immediate rewards provide dense learning signal
+      - Compact state focuses on what matters: file popularity & cache state
     """
+
+    # Number of recent requests to track for frequency estimation
+    RECENT_WINDOW = 500
 
     def __init__(
         self, capacity: int, num_files: int, num_users: int,
-        learning_rate: float = 0.0001, gamma: float = 0.99,
+        learning_rate: float = 0.001, gamma: float = 0.99,
         epsilon_start: float = 1.0, epsilon_end: float = 0.01,
         epsilon_decay_steps: int = 200000,
         use_neural_network: bool = True,
-        hidden_dims: List[int] = [128, 128],
+        hidden_dims: List[int] = [64, 32],
         batch_size: int = 64, replay_buffer_size: int = 50000,
         train_freq: int = 4, warm_up_steps: Optional[int] = None,
         use_prioritized_replay: bool = True,
@@ -211,7 +209,7 @@ class DQNCache(CacheBase):
         self.train_freq    = train_freq
         self.gradient_clip = gradient_clip
         self.tau           = tau
-        self.warm_up_steps = max(10 * batch_size, 1000) if warm_up_steps is None else warm_up_steps
+        self.warm_up_steps = max(5 * batch_size, 500) if warm_up_steps is None else warm_up_steps
         self._set_seeds(seed)
 
         self.epsilon       = epsilon_start
@@ -220,26 +218,38 @@ class DQNCache(CacheBase):
         self.epsilon_decay = (epsilon_start - epsilon_end) / max(1, epsilon_decay_steps)
         self.eval_mode     = False
 
+        # Cache storage
+        self.cache_set    = set()       # set of cached file IDs
+        self.file_to_slot = {}          # file_id -> slot index (for compat)
         self.cache_slots  = [-1] * capacity
-        self.file_to_slot = {}
-        self.lru_counters = np.zeros(capacity, dtype=np.int32)
-        self.lfu_counters = np.zeros(capacity, dtype=np.int32)
         self.timestep     = 0
 
-        self.popularity       = np.ones(num_files, dtype=np.float32) / num_files
-        self.popularity_decay = 0.9
+        # Popularity tracking
+        self.request_counts = np.zeros(num_files, dtype=np.float64)
+        self.recent_requests = deque(maxlen=self.RECENT_WINDOW)
+        self.popularity_rank = np.arange(num_files)  # initial: 0 is most popular
 
+        # NOMA tracking
         self.channel_history = deque(maxlen=500)
         self.noma_history    = deque(maxlen=500)
         self.cic_count       = 0
         self.sic_count       = 0
 
+        # Binary action space: {0=skip, 1=cache}
+        self.action_dim = 2
+
         self.use_nn        = use_neural_network and TORCH_AVAILABLE
         self.training_step = 0
-        self.action_dim    = capacity
+
+        # State dimension: compact features
+        # [file_pop_rank, file_recent_freq, is_cached, cache_occupancy,
+        #  mean_pop_cached, min_pop_cached, max_pop_cached,
+        #  would_improve_cache, would_improve_ratio,
+        #  cic_potential, channel_mean, channel_std,
+        #  noma_success_rate, num_unique_recent]
+        self.state_dim = 14
 
         if self.use_nn:
-            self.state_dim      = 2 * capacity + 6
             self.device         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             self.q_network      = DuelingDQN(self.state_dim, self.action_dim, hidden_dims).to(self.device)
             self.target_network = DuelingDQN(self.state_dim, self.action_dim, hidden_dims).to(self.device)
@@ -263,13 +273,12 @@ class DQNCache(CacheBase):
         self.episode_rewards   = []
         self.losses            = []
         self.cumulative_reward = 0.0
-        self.pending_transitions: Dict[int, Dict] = {}
 
-        print('DQNCache initialized')
-        print(f'  Mode      : {"Neural Network (DQN)" if self.use_nn else "Q-table"}')
-        print(f'  Warm-up   : {self.warm_up_steps} steps')
-        print(f'  Fixes     : DQN-A/J (call order), DQN-I (clear reset), '
-              f'BUG-DQN-2 (NaN guard), BUG-DQN-4 (neutral fill reward)')
+        print('DQNCache v2 initialized (binary action space)')
+        print(f'  State dim  : {self.state_dim}')
+        print(f'  Action dim : {self.action_dim} (0=skip, 1=cache)')
+        print(f'  Network    : {hidden_dims}')
+        print(f'  Warm-up    : {self.warm_up_steps} steps')
 
     def _set_seeds(self, seed: int):
         random.seed(seed)
@@ -280,81 +289,274 @@ class DQNCache(CacheBase):
                 torch.cuda.manual_seed_all(seed)
 
     # -------------------------------------------------------------------------
-    # STATE (O(N))
+    # POPULARITY TRACKING
+    # -------------------------------------------------------------------------
+    def _update_popularity(self, file_id: int):
+        """Update request counts and popularity ranking."""
+        self.request_counts[file_id] += 1
+        self.recent_requests.append(file_id)
+
+    def _get_file_popularity_rank(self, file_id: int) -> float:
+        """
+        Get normalized popularity rank of a file (0=most popular, 1=least).
+        Based on cumulative request counts.
+        """
+        # Rank files by request count (descending)
+        rank = np.sum(self.request_counts > self.request_counts[file_id])
+        return float(rank) / max(self.num_files - 1, 1)
+
+    def _get_file_recent_freq(self, file_id: int) -> float:
+        """Frequency of file in recent request window."""
+        if len(self.recent_requests) == 0:
+            return 0.0
+        count = sum(1 for f in self.recent_requests if f == file_id)
+        return float(count) / len(self.recent_requests)
+
+    def _get_min_popularity_slot(self) -> Tuple[int, int]:
+        """
+        Find the cache slot with the least popular file (best eviction candidate).
+        Returns (slot_index, file_id).
+        """
+        worst_slot = -1
+        worst_file = -1
+        worst_count = float('inf')
+        for slot_idx in range(self.capacity):
+            fid = self.cache_slots[slot_idx]
+            if fid == -1:
+                continue
+            if self.request_counts[fid] < worst_count:
+                worst_count = self.request_counts[fid]
+                worst_slot  = slot_idx
+                worst_file  = fid
+        return worst_slot, worst_file
+
+    # -------------------------------------------------------------------------
+    # STATE (compact ~15 dims)
     # -------------------------------------------------------------------------
     def _get_state_vector(self, requested_file: int) -> np.ndarray:
-        state    = []
-        occupied = np.array([s != -1 for s in self.cache_slots], dtype=bool)
-        has_occ  = occupied.any()
-        max_lru  = max(int(self.lru_counters[occupied].max()), 1) if has_occ else 1
-        max_lfu  = max(int(self.lfu_counters[occupied].max()), 1) if has_occ else 1
+        """
+        Compact state vector focused on what matters for caching decisions.
+        """
+        state = []
 
-        for i in range(self.capacity):
-            state.append(-1.0 if not occupied[i] else float(self.lru_counters[i] / max_lru))
-        for i in range(self.capacity):
-            state.append( 0.0 if not occupied[i] else float(self.lfu_counters[i] / max_lfu))
+        # 1. Requested file's popularity rank (normalized 0=most popular)
+        pop_rank = self._get_file_popularity_rank(requested_file)
+        state.append(pop_rank)
 
-        state.append(float(self.popularity[requested_file]))
-        state.append(float(occupied.sum() / self.capacity))
+        # 2. Requested file's recent frequency
+        recent_freq = self._get_file_recent_freq(requested_file)
+        state.append(recent_freq)
 
+        # 3. Whether file is already cached (0 or 1)
+        is_cached = 1.0 if requested_file in self.cache_set else 0.0
+        state.append(is_cached)
+
+        # 4. Cache occupancy (0 to 1)
+        occupancy = len(self.cache_set) / self.capacity
+        state.append(occupancy)
+
+        # Cache popularity statistics
+        if self.cache_set and len(self.cache_set) > 0:
+            cached_counts = np.array([self.request_counts[f] for f in self.cache_set if f >= 0])
+            total_counts = max(self.request_counts.sum(), 1.0)
+            
+            if len(cached_counts) > 0:
+                cached_pops = cached_counts / total_counts
+                # 5. Mean popularity of cached files
+                state.append(float(cached_pops.mean()))
+                # 6. Min popularity (= worst cached file)
+                state.append(float(cached_pops.min()))
+                # 7. Max popularity (= best cached file)
+                state.append(float(cached_pops.max()))
+            else:
+                state.extend([0.0, 0.0, 0.0])
+        else:
+            state.extend([0.0, 0.0, 0.0])
+
+        # 8. Popularity of worst cached file compared to requested file
+        if self.cache_set:
+            _, worst_file = self._get_min_popularity_slot()
+            if worst_file >= 0:
+                would_improve = 1.0 if self.request_counts[requested_file] > self.request_counts[worst_file] else 0.0
+            else:
+                would_improve = 1.0
+        else:
+            would_improve = 1.0
+        state.append(would_improve)
+
+        # 9. Would caching improve — ratio of request counts
+        if self.cache_set and len(self.cache_set) >= self.capacity:
+            _, worst_file = self._get_min_popularity_slot()
+            if worst_file >= 0 and self.request_counts[worst_file] > 0:
+                ratio = float(self.request_counts[requested_file] / self.request_counts[worst_file])
+                state.append(min(ratio, 5.0) / 5.0)  # normalized 0-1
+            else:
+                state.append(1.0)
+        else:
+            state.append(1.0)  # cache not full, always beneficial to add
+
+        # 10. CIC potential (stub — we don't know paired file yet, use history)
+        if self.noma_history:
+            nh = list(self.noma_history)[-100:]
+            cic_rate = float(sum(1 for x in nh if x.get('cic', False)) / len(nh))
+        else:
+            cic_rate = 0.0
+        state.append(cic_rate)
+
+        # 11-12. Channel statistics
         if self.channel_history:
             ch = list(self.channel_history)[-100:]
             state.extend([float(np.mean(ch)), float(np.std(ch))])
         else:
             state.extend([0.5, 0.1])
 
-        if self.enable_noma_awareness and self.noma_history:
+        # 13. NOMA success rate
+        if self.noma_history:
             nh = list(self.noma_history)[-100:]
-            state.append(float(sum(1 for x in nh if x.get('cic',     False)) / len(nh)))
             state.append(float(sum(1 for x in nh if x.get('success', False)) / len(nh)))
         else:
-            state.extend([0.0, 0.5])
+            state.append(0.5)
+
+        # 14. Number of unique files in recent window (diversity metric)
+        if self.recent_requests:
+            unique_ratio = len(set(self.recent_requests)) / len(self.recent_requests)
+        else:
+            unique_ratio = 1.0
+        state.append(unique_ratio)
 
         return np.array(state, dtype=np.float32)
 
     # -------------------------------------------------------------------------
-    # ACTION SELECTION
+    # ACTION SELECTION (binary: 0=skip, 1=cache)
     # -------------------------------------------------------------------------
     def _select_action(self, state: np.ndarray, file_id: int) -> int:
-        if file_id in self.file_to_slot:
-            return -1
-        empty = [i for i, f in enumerate(self.cache_slots) if f == -1]
-        if empty:
-            return empty[0]
+        """
+        Select binary action: 0=skip (don't cache), 1=cache this file.
+        If file already cached, always return 0 (skip, it's already there).
+        """
+        if file_id in self.cache_set:
+            return 0  # Already cached, nothing to do
+
         if self.eval_mode or random.random() >= self.epsilon:
             if self.use_nn:
                 with torch.no_grad():
                     t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                    return int(self.q_network(t).cpu().numpy()[0].argmax())
+                    q_values = self.q_network(t).cpu().numpy()[0]
+                    return int(q_values.argmax())
             else:
                 return int(self.q_table[self._discretize_state(state)].argmax())
-        return random.randint(0, self.capacity - 1)
+        return random.randint(0, 1)
 
     def _discretize_state(self, state: np.ndarray) -> str:
+        """Discretize state for Q-table fallback."""
         bins = []
         for v in state[:min(10, len(state))]:
-            bins.append('E' if v < 0 else 'L' if v < 0.33 else 'M' if v < 0.67 else 'H')
+            bins.append('L' if v < 0.33 else 'M' if v < 0.67 else 'H')
         return ''.join(bins)
 
     # -------------------------------------------------------------------------
-    # REWARD (FIX-3)
+    # REWARD (immediate, caching-quality focused)
     # -------------------------------------------------------------------------
     def _compute_reward(
-        self, cache_hit: bool, cic_enabled: bool = False,
-        noma_success: bool = True, outage: bool = False,
-        ber: Optional[float] = None
+        self, action: int, file_id: int, cache_hit: bool,
+        cic_enabled: bool = False, evicted_file: Optional[int] = None
     ) -> float:
         """
-        Deferred reward for eviction decisions.
-        Outage excluded (channel quality independent of caching choice).
+        Immediate reward based on caching decision quality.
+
+        Reward hierarchy:
+          Cache hit:  +2.0  (file was already cached — good previous decision)
+          Cache popular file replacing unpopular: +1.0 to +2.0
+          CIC enabled by this cache: +1.5 bonus
+          Cache unpopular file: -0.5
+          Skip when should have cached (popular file, cache not full): -0.3
+          Skip when correct to skip: +0.1
         """
-        if cache_hit:        return 10.0
-        if not noma_success: return -5.0
-        reward = 3.0 if cic_enabled else 0.0
-        if ber is not None:
-            if   ber < 1e-4: reward += 1.0
-            elif ber > 1e-2: reward -= 2.0
-        return reward
+        if cache_hit:
+            # Reward for a hit — this file was correctly cached before
+            return 2.0
+
+        pop_rank = self._get_file_popularity_rank(file_id)
+
+        if action == 1:  # Agent chose to cache
+            # Base reward: how popular is what we cached?
+            if pop_rank < 0.1:       # Top 10% most popular
+                reward = 1.5
+            elif pop_rank < 0.3:     # Top 30%
+                reward = 0.8
+            elif pop_rank < 0.5:     # Top 50%
+                reward = 0.2
+            else:                     # Bottom 50%
+                reward = -0.5
+
+            # Bonus for eviction quality (did we evict something worse?)
+            if evicted_file is not None:
+                evicted_rank = self._get_file_popularity_rank(evicted_file)
+                if evicted_rank > pop_rank:
+                    # Evicted less popular file → good swap
+                    reward += 0.5
+                else:
+                    # Evicted more popular file → bad swap
+                    reward -= 0.5
+
+            # CIC bonus
+            if cic_enabled:
+                reward += 1.5
+
+            return reward
+
+        else:  # action == 0: Agent chose to skip
+            if pop_rank < 0.2 and len(self.cache_set) < self.capacity:
+                # Skipped a popular file when cache had room — bad
+                return -0.5
+            elif pop_rank < 0.2:
+                # Skipped popular file but cache is full — check if swap would help
+                _, worst_file = self._get_min_popularity_slot()
+                if worst_file >= 0:
+                    worst_rank = self._get_file_popularity_rank(worst_file)
+                    if worst_rank > pop_rank + 0.2:
+                        # Should have swapped
+                        return -0.3
+                return 0.0  # Neutral — cache is full, swap wouldn't help much
+            else:
+                # Correctly skipped unpopular file
+                return 0.1
+
+    # -------------------------------------------------------------------------
+    # EXECUTE CACHING ACTION
+    # -------------------------------------------------------------------------
+    def _execute_cache(self, file_id: int) -> Optional[int]:
+        """
+        Insert file_id into cache. If full, evict least popular file.
+        Returns evicted file_id or None.
+        """
+        if file_id in self.cache_set:
+            return None  # Already cached
+
+        evicted_file = None
+
+        if len(self.cache_set) >= self.capacity:
+            # Evict least popular cached file
+            worst_slot, worst_file = self._get_min_popularity_slot()
+            if worst_slot >= 0 and worst_file >= 0:
+                evicted_file = worst_file
+                self.cache_set.discard(worst_file)
+                if worst_file in self.file_to_slot:
+                    del self.file_to_slot[worst_file]
+                self.cache_slots[worst_slot] = file_id
+                self.file_to_slot[file_id] = worst_slot
+                self.cache_set.add(file_id)
+                self._record_eviction()
+        else:
+            # Find empty slot
+            for slot_idx in range(self.capacity):
+                if self.cache_slots[slot_idx] == -1:
+                    self.cache_slots[slot_idx] = file_id
+                    self.file_to_slot[file_id] = slot_idx
+                    self.cache_set.add(file_id)
+                    break
+
+        return evicted_file
 
     # -------------------------------------------------------------------------
     # MAIN REQUEST
@@ -371,18 +573,20 @@ class DQNCache(CacheBase):
         """
         Handle one file request with NOMA-aware DQN learning.
 
-        Critical call ordering (DQN-A / DQN-J fix):
-          _update_counters() and popularity bump happen BEFORE
-          _learn_from_request() so all _get_state_vector() calls
-          inside the learning step see fresh, up-to-date cache state.
+        v2 redesign: binary action, immediate reward, compact state.
         """
         self.timestep += 1
+
+        # Track popularity BEFORE decision (so state reflects current request)
+        self._update_popularity(item)
+
         cache_hit     = self.is_hit(item, update_stats=True)
         paired_cached = (
             self.is_hit(paired_file, update_stats=False)
             if paired_file is not None else False
         )
 
+        # Build result dict
         result = {
             'hit': cache_hit, 'cic_enabled': False,
             'paired_user_cached': paired_cached,
@@ -399,6 +603,7 @@ class DQNCache(CacheBase):
                 result['cic_enabled']         = True
                 self.noma_paired_hits        += 1
 
+        # Update tracking
         if user_id is not None and channel_gain is not None:
             self.channel_gains[user_id] = channel_gain
         if user_id is not None and paired_user is not None:
@@ -413,160 +618,64 @@ class DQNCache(CacheBase):
             if result['cic_enabled']:         self.cic_count += 1
             if result['strong_user_benefit']: self.sic_count += 1
 
-        # ── DQN-A FIX: update LRU/LFU counters BEFORE _learn_from_request()
-        # so every _get_state_vector() call inside learning sees the
-        # post-request cache state (hit-slot LRU reset, miss insertion).
-        self._update_counters(item, cache_hit)
-
-        # ── DQN-J FIX: update popularity BEFORE _learn_from_request()
-        # so popularity[item] in state vectors reflects the current request.
-        self.popularity *= self.popularity_decay
-        self.popularity[item] += (1.0 - self.popularity_decay)
-        # BUG-DQN-2 FIX: guard float32 underflow → NaN
-        total = self.popularity.sum()
-        if total > 1e-30:
-            self.popularity /= total
-        else:
-            self.popularity = np.ones(self.num_files, dtype=np.float32) / self.num_files
-
+        # ── DQN Learning ──
         if not self.eval_mode:
-            self._learn_from_request(
-                file_id=item, cache_hit=cache_hit,
-                cic_enabled=result['cic_enabled'],
-                noma_success=noma_success, outage=outage,
-                ber=ber, episode_done=episode_done)
+            state = self._get_state_vector(item)
+            action = self._select_action(state, item)
 
-        return result
+            evicted_file = None
+            if cache_hit:
+                action = 0  # File already cached, no action needed
+            elif action == 1:
+                evicted_file = self._execute_cache(item)
+                # Re-check CIC after caching
+                if paired_file is not None and item in self.cache_set:
+                    # Caching might have enabled CIC for paired user
+                    result['cic_enabled'] = True
 
-    # -------------------------------------------------------------------------
-    # DEFERRED CREDIT ASSIGNMENT
-    # -------------------------------------------------------------------------
-    def _learn_from_request(
-        self, file_id: int, cache_hit: bool, cic_enabled: bool,
-        noma_success: bool, outage: bool, ber: Optional[float], episode_done: bool
-    ):
-        """
-        DQN update using deferred pending_transitions.
-
-        By the time this is called, _update_counters() and popularity
-        have already been updated in request(), so all
-        _get_state_vector() calls here see the correct post-request
-        cache state (DQN-A / DQN-J fix).
-        """
-        # Resolve deferred reward for file_id if it was previously evicted
-        if file_id in self.pending_transitions:
-            pending = self.pending_transitions.pop(file_id)
-            reward  = self._compute_reward(
-                cache_hit=cache_hit, cic_enabled=cic_enabled,
-                noma_success=noma_success, outage=outage, ber=ber)
-            self._push_to_buffer({
-                'state':      pending['state'],
-                'action':     pending['action'],
-                'reward':     reward,
-                'next_state': self._get_state_vector(file_id),  # fresh state
-                'done':       episode_done,
-            })
+            # Compute immediate reward
+            reward = self._compute_reward(
+                action=action, file_id=item, cache_hit=cache_hit,
+                cic_enabled=result['cic_enabled'], evicted_file=evicted_file
+            )
             self.cumulative_reward += reward
 
-        if not cache_hit:
-            empty_slots  = [i for i, f in enumerate(self.cache_slots) if f == -1]
-            cache_full   = len(empty_slots) == 0
-            state_before = self._get_state_vector(file_id)  # fresh state
-            action       = self._select_action(state_before, file_id)
+            # Get next state and push to buffer
+            next_state = self._get_state_vector(item)
+            self._push_to_buffer({
+                'state':      state,
+                'action':     action,
+                'reward':     reward,
+                'next_state': next_state,
+                'done':       episode_done,
+            })
 
-            if action >= 0:
-                if cache_full:
-                    evicted_file = self.cache_slots[action]
-                    self._execute_action(action, file_id)
-                    state_after = self._get_state_vector(file_id)
-                    if evicted_file != -1:
-                        if evicted_file in self.pending_transitions:
-                            old = self.pending_transitions.pop(evicted_file)
-                            self._push_to_buffer({
-                                'state':      old['state'],
-                                'action':     old['action'],
-                                'reward':     0.0,
-                                'next_state': state_before,
-                                'done':       False,
-                            })
-                        self.pending_transitions[evicted_file] = {
-                            'state':  state_before,
-                            'action': action,
-                            'next_state': state_after,
-                        }
-                else:
-                    # BUG-DQN-4 FIX: filling an empty slot is neutral —
-                    # no eviction trade-off, use reward=0.0.
-                    self._execute_action(action, file_id)
-                    state_after = self._get_state_vector(file_id)
-                    self._push_to_buffer({
-                        'state':      state_before,
-                        'action':     action,
-                        'reward':     0.0,
-                        'next_state': state_after,
-                        'done':       episode_done,
-                    })
+            # Training step
+            self.training_step += 1
+            buf_len = len(self.replay_buffer) if self.replay_buffer is not None else 0
+            if (self.use_nn
+                    and buf_len >= self.warm_up_steps
+                    and self.training_step % self.train_freq == 0
+                    and buf_len >= self.batch_size):
+                self._train_step()
 
-        self.training_step += 1
-        buf_len = len(self.replay_buffer) if self.replay_buffer is not None else 0
-        if (self.use_nn
-                and buf_len >= self.warm_up_steps
-                and self.training_step % self.train_freq == 0
-                and buf_len >= self.batch_size):
-            self._train_step()
+            # Epsilon decay
+            if self.epsilon > self.epsilon_end:
+                self.epsilon = max(self.epsilon_end, self.epsilon - self.epsilon_decay)
 
-        if not self.eval_mode and self.epsilon > self.epsilon_end:
-            self.epsilon = max(self.epsilon_end, self.epsilon - self.epsilon_decay)
+            if episode_done:
+                self.episode_rewards.append(self.cumulative_reward)
+                self.cumulative_reward = 0.0
 
-        if episode_done:
-            self.episode_rewards.append(self.cumulative_reward)
-            self.cumulative_reward = 0.0
-            for ef, pending in list(self.pending_transitions.items()):
-                self._push_to_buffer({
-                    'state':      pending['state'],
-                    'action':     pending['action'],
-                    'reward':     0.0,
-                    'next_state': self._get_state_vector(file_id),
-                    'done':       True,
-                })
-            self.pending_transitions.clear()
+        else:
+            # Eval mode: use learned policy but don't train
+            if not cache_hit:
+                state = self._get_state_vector(item)
+                action = self._select_action(state, item)
+                if action == 1:
+                    self._execute_cache(item)
 
-    def _push_to_buffer(self, exp: Dict):
-        if self.use_nn and self.replay_buffer is not None:
-            if self.use_prioritized:
-                self.replay_buffer.add(exp)
-            else:
-                self.replay_buffer.append(exp)
-        elif not self.use_nn:
-            self._update_q_table(exp)
-
-    def _execute_action(self, action: int, file_id: int):
-        """Place file_id into cache slot `action`, evicting whatever was there."""
-        if action < 0 or action >= self.capacity:
-            return
-        old = self.cache_slots[action]
-        if old != -1 and old in self.file_to_slot:
-            del self.file_to_slot[old]
-        self.cache_slots[action]   = file_id
-        self.file_to_slot[file_id] = action
-        self.lru_counters[action]  = 0
-        self.lfu_counters[action]  = 1
-
-    def _update_counters(self, file_id: int, cache_hit: bool):
-        """
-        Age all LRU counters by 1; refresh the hit slot's LRU to 0
-        and increment its LFU.
-
-        DQN-A FIX: called BEFORE _learn_from_request() in request()
-        so state vectors inside the learning step see fresh counters.
-        """
-        for i in range(self.capacity):
-            if self.cache_slots[i] != -1:
-                self.lru_counters[i] += 1
-        if cache_hit and file_id in self.file_to_slot:
-            s = self.file_to_slot[file_id]
-            self.lru_counters[s] = 0
-            self.lfu_counters[s] += 1
+        return result
 
     # -------------------------------------------------------------------------
     # TRAINING (Double DQN + Soft Target Update + PER)
@@ -621,6 +730,15 @@ class DQNCache(CacheBase):
                          self.q_network.parameters()):
             tp.data.copy_(self.tau * p.data + (1.0 - self.tau) * tp.data)
 
+    def _push_to_buffer(self, exp: Dict):
+        if self.use_nn and self.replay_buffer is not None:
+            if self.use_prioritized:
+                self.replay_buffer.add(exp)
+            else:
+                self.replay_buffer.append(exp)
+        elif not self.use_nn:
+            self._update_q_table(exp)
+
     def _update_q_table(self, exp: Dict):
         sk  = self._discretize_state(exp['state'])
         nk  = self._discretize_state(exp['next_state'])
@@ -634,41 +752,44 @@ class DQNCache(CacheBase):
     # -------------------------------------------------------------------------
     def populate(self, items: Optional[Iterable[int]] = None):
         """Pre-load cache with top-popularity files."""
-        self.pending_transitions.clear()
-        top = (np.argsort(-self.popularity)[:self.capacity]
-               if items is None else list(items)[:self.capacity])
+        if items is None:
+            # Use request counts to determine popular files
+            top = np.argsort(-self.request_counts)[:self.capacity]
+        else:
+            top = list(items)[:self.capacity]
+
         self.cache_slots  = [-1] * self.capacity
+        self.cache_set.clear()
         self.file_to_slot.clear()
         for slot, fid in enumerate(top):
-            self.cache_slots[slot]      = int(fid)
-            self.file_to_slot[int(fid)] = slot
-            self.lfu_counters[slot]     = 1
-            self.lru_counters[slot]     = 0
+            fid = int(fid)
+            self.cache_slots[slot] = fid
+            self.file_to_slot[fid] = slot
+            self.cache_set.add(fid)
 
     def is_hit(self, item: int, update_stats: bool = True) -> bool:
-        hit = int(item) in self.file_to_slot
+        hit = int(item) in self.cache_set
         if update_stats:
             self._record_hit() if hit else self._record_miss()
         return hit
 
     def get_contents(self) -> Set[int]:
-        return set(f for f in self.cache_slots if f != -1)
+        return set(self.cache_set)
 
     def clear(self):
         """
-        Reset cache state.
-        DQN-I FIX: also resets cumulative_reward to 0.0 to prevent
-        reward accumulator carry-over between evaluation runs.
-        Note: episode_rewards and losses are intentionally preserved
-        as training history (useful for post-hoc analysis).
+        Reset cache state (but preserve learned model weights).
         """
-        self.cache_slots       = [-1] * self.capacity
+        self.cache_slots  = [-1] * self.capacity
+        self.cache_set.clear()
         self.file_to_slot.clear()
-        self.lru_counters      = np.zeros(self.capacity, dtype=np.int32)
-        self.lfu_counters      = np.zeros(self.capacity, dtype=np.int32)
-        self.pending_transitions.clear()
-        self.cumulative_reward = 0.0   # DQN-I FIX
+        self.cumulative_reward = 0.0
         self.reset_stats()
+
+    def reset_popularity(self):
+        """Reset popularity tracking (for new episode)."""
+        self.request_counts = np.zeros(self.num_files, dtype=np.float64)
+        self.recent_requests.clear()
 
     def set_eval_mode(self, eval_mode: bool = True):
         """Toggle eval mode; preserves/restores training epsilon."""
@@ -690,17 +811,15 @@ class DQNCache(CacheBase):
     def save_model(self, filepath: str):
         if self.use_nn:
             d = {
-                'q_network':           self.q_network.state_dict(),
-                'target_network':      self.target_network.state_dict(),
-                'optimizer':           self.optimizer.state_dict(),
-                'training_step':       self.training_step,
-                'epsilon':             self.epsilon,
-                'popularity':          self.popularity,
-                'cache_slots':         self.cache_slots,
-                'file_to_slot':        self.file_to_slot,
-                'lru_counters':        self.lru_counters,
-                'lfu_counters':        self.lfu_counters,
-                'pending_transitions': self.pending_transitions,
+                'q_network':       self.q_network.state_dict(),
+                'target_network':  self.target_network.state_dict(),
+                'optimizer':       self.optimizer.state_dict(),
+                'training_step':   self.training_step,
+                'epsilon':         self.epsilon,
+                'request_counts':  self.request_counts,
+                'cache_slots':     self.cache_slots,
+                'cache_set':       list(self.cache_set),
+                'file_to_slot':    self.file_to_slot,
             }
             if self.use_prioritized:
                 d['per_beta']      = self.replay_buffer.get_beta()
@@ -709,13 +828,13 @@ class DQNCache(CacheBase):
         else:
             with open(filepath, 'wb') as f:
                 pickle.dump({
-                    'q_table':             dict(self.q_table),
-                    'training_step':       self.training_step,
-                    'epsilon':             self.epsilon,
-                    'popularity':          self.popularity,
-                    'cache_slots':         self.cache_slots,
-                    'file_to_slot':        self.file_to_slot,
-                    'pending_transitions': self.pending_transitions,
+                    'q_table':         dict(self.q_table),
+                    'training_step':   self.training_step,
+                    'epsilon':         self.epsilon,
+                    'request_counts':  self.request_counts,
+                    'cache_slots':     self.cache_slots,
+                    'cache_set':       list(self.cache_set),
+                    'file_to_slot':    self.file_to_slot,
                 }, f)
         print(f'Model saved to {filepath}')
 
@@ -726,28 +845,26 @@ class DQNCache(CacheBase):
             self.q_network.load_state_dict(ckpt['q_network'])
             self.target_network.load_state_dict(ckpt['target_network'])
             self.optimizer.load_state_dict(ckpt['optimizer'])
-            self.training_step       = ckpt['training_step']
-            self.epsilon             = ckpt['epsilon']
-            self.popularity          = ckpt['popularity']
-            self.cache_slots         = ckpt['cache_slots']
-            self.file_to_slot        = ckpt['file_to_slot']
-            self.lru_counters        = ckpt.get('lru_counters', self.lru_counters)
-            self.lfu_counters        = ckpt.get('lfu_counters', self.lfu_counters)
-            self.pending_transitions = ckpt.get('pending_transitions', {})
+            self.training_step  = ckpt['training_step']
+            self.epsilon        = ckpt['epsilon']
+            self.request_counts = ckpt.get('request_counts', self.request_counts)
+            self.cache_slots    = ckpt.get('cache_slots', self.cache_slots)
+            self.cache_set      = set(ckpt.get('cache_set', []))
+            self.file_to_slot   = ckpt.get('file_to_slot', {})
             if self.use_prioritized and 'per_beta' in ckpt:
                 self.replay_buffer.beta      = ckpt['per_beta']
                 self.replay_buffer.frame_idx = ckpt.get('per_frame_idx', 0)
         else:
             with open(filepath, 'rb') as f:
                 ckpt = pickle.load(f)
-            self.q_table             = defaultdict(
+            self.q_table        = defaultdict(
                 lambda: np.zeros(self.action_dim), ckpt['q_table'])
-            self.training_step       = ckpt['training_step']
-            self.epsilon             = ckpt['epsilon']
-            self.popularity          = ckpt['popularity']
-            self.cache_slots         = ckpt['cache_slots']
-            self.file_to_slot        = ckpt['file_to_slot']
-            self.pending_transitions = ckpt.get('pending_transitions', {})
+            self.training_step  = ckpt['training_step']
+            self.epsilon        = ckpt['epsilon']
+            self.request_counts = ckpt.get('request_counts', self.request_counts)
+            self.cache_slots    = ckpt.get('cache_slots', self.cache_slots)
+            self.cache_set      = set(ckpt.get('cache_set', []))
+            self.file_to_slot   = ckpt.get('file_to_slot', {})
         print(f'Model loaded from {filepath}')
 
     # -------------------------------------------------------------------------
@@ -766,14 +883,14 @@ class DQNCache(CacheBase):
             'cic_count':           self.cic_count,
             'sic_count':           self.sic_count,
             'warm_up_steps':       self.warm_up_steps,
-            'pending_transitions': len(self.pending_transitions),
             'beta':                self.replay_buffer.get_beta() if (
                                        self.use_prioritized and self.replay_buffer
                                    ) else 0.0,
+            'action_dim':          self.action_dim,
+            'state_dim':           self.state_dim,
         }
         return {**base, **dqn}
 
 
 # Alias for compatibility
 StableDQNCache = DQNCache
-

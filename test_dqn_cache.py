@@ -166,14 +166,14 @@ def test_state_representation():
             print_error("State contains Inf values")
             return False
         
-        # Verify state components
-        lru_part = state[:cache.capacity]
-        lfu_part = state[cache.capacity:2*cache.capacity]
-        global_features = state[2*cache.capacity:]
-        
-        print_info("LRU counters", f"range [{lru_part.min():.2f}, {lru_part.max():.2f}]")
-        print_info("LFU counters", f"range [{lfu_part.min():.2f}, {lfu_part.max():.2f}]")
-        print_info("Global features", f"{len(global_features)} dims")
+        # Verify state components (new 14-dim compact state)
+        if len(state) != cache.state_dim:
+            print_error(f"State dimension mismatch: {len(state)} != {cache.state_dim}")
+            return False
+            
+        print_info("State Dimension", f"{len(state)} dims")
+        print_info("Rank & Freq", f"rank={state[0]:.2f}, freq={state[1]:.2f}")
+        print_info("Cache occupancy", f"occ={state[3]:.2f}")
         
         print_success("State representation valid")
         return True
