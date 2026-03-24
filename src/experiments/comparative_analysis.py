@@ -2,17 +2,21 @@
 """
 Comprehensive Comparative Analysis: Cache-Aided NOMA vs Traditional Systems
 
+
 ✅ AUTO-TRAINS DQN IF NEEDED (Dec 12, 2025)
+
 
 This module implements research-validated comparative studies with automatic
 DQN training integration. If DQN checkpoint doesn't exist, it will train
 automatically before running comparisons.
+
 
 Research References:
 - arXiv:1712.09557 (2018): "Cache-Aided Non-Orthogonal Multiple Access"
 - arXiv:1909.11074 (2019): "Power Allocation in Cache-Aided NOMA"
 - IEEE Survey (2022): "A Survey on Applications of Cache-Aided NOMA"
 - arXiv:2209.07809 (2022): "M2DQN - DQN training requirements"
+
 
 Key Features:
 1. ✅ Automatic DQN checkpoint detection
@@ -21,10 +25,12 @@ Key Features:
 4. ✅ Complete 6-policy analysis: TopK, LRU, LFU, Random, NO-CACHE, DQN
 5. ✅ 9 comprehensive metrics with BER for both users
 
+
 Workflow:
 - First run: Auto-trains DQN (1000 episodes, ~10-30 min)
 - Subsequent runs: Loads trained DQN checkpoint
 - Results: Publication-ready comparison plots
+
 
 Outputs:
 - cache_aided_vs_traditional_noma.png: Main comparison (9 subplots)
@@ -32,10 +38,28 @@ Outputs:
 - performance_summary.txt: Statistical summary
 - models/dqn_cache/dqn_cache_final.pth: Trained DQN checkpoint
 
+
+Bug Fix Log (2026 Audit):
+- BUG-CA-1 (CRITICAL): LRU/LFU/Random hit rate was 0.0 — caches never
+  warmed up. Fixed by adding _warmup_cache() that feeds CACHE_SIZE*10
+  Zipf-sampled requests through is_hit(update_stats=True) before eval.
+- BUG-CA-2 (CRITICAL): simulate_sic_process() received own-file cache
+  flags instead of partner-file flags. Swapped weak_cached/strong_cached.
+- BUG-CA-3 (HIGH): sum_rate used sic_results['sum_rate'] which ignored
+  cache-rate overrides for partial hits. Recomputed as rate_weak+rate_strong.
+- BUG-CA-4 (CRITICAL, root-cause fix): DQN cache_hit = 0.0 at all SNR.
+  Previous attempt called request() in eval_mode=True; but _select_action()
+  and _execute_action() live INSIDE _learn_from_request(), which is
+  guarded by `if not self.eval_mode` — so no files were ever inserted.
+  Fix: temporarily set_eval_mode(False) during warmup so _execute_action
+  fires, then set_eval_mode(True) + reset_stats() before evaluation.
+
+
 Author: Cache-Aided NOMA Team
 Date: December 12, 2025
 Version: 4.0 (AUTO-TRAIN DQN Integration)
 """
+
 
 import numpy as np
 import pandas as pd
@@ -50,9 +74,11 @@ import warnings
 import sys
 warnings.filterwarnings('ignore')
 
+
 # Project imports
 from src import config as cfg
 from src.utils import set_seed, sample_zipf_catalog
+
 
 # NOMA imports
 from src.noma import (
@@ -65,6 +91,7 @@ from src.noma import (
     rate_from_sinr
 )
 
+
 # Caching imports
 from src.caching import (
     create_cache,
@@ -73,6 +100,7 @@ from src.caching import (
     LFUCache,
     RandomCache
 )
+
 
 # Try DQN import
 try:
@@ -83,9 +111,11 @@ except ImportError:
     print("⚠️  DQN not available - will skip DQN comparison")
 
 
+
 # ============================================================================
 # DQN TRAINING INTEGRATION
 # ============================================================================
+
 
 def check_dqn_checkpoint() -> Optional[str]:
     """
@@ -105,6 +135,7 @@ def check_dqn_checkpoint() -> Optional[str]:
         return alt_path
     
     return None
+
 
 
 def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
@@ -175,6 +206,7 @@ def train_dqn_automatically(cfg, num_episodes: int = 1000) -> Optional[str]:
         return None
 
 
+
 def load_trained_dqn(checkpoint_path: str, cfg) -> Optional[object]:
     """
     Load trained DQN cache from checkpoint.
@@ -214,9 +246,11 @@ def load_trained_dqn(checkpoint_path: str, cfg) -> Optional[object]:
         return None
 
 
+
 # ============================================================================
 # COMPREHENSIVE COMPARATIVE ANALYSIS ENGINE
 # ============================================================================
+
 
 class CacheAidedNOMAAnalysis:
     """
@@ -278,12 +312,110 @@ class CacheAidedNOMAAnalysis:
         if n == 0 or rates.sum() == 0:
             return 0.0
         return (rates.sum() ** 2) / (n * (rates ** 2).sum())
-    
-    def setup_cache(self, policy: str, requests: np.ndarray = None) -> Optional[object]:
+
+    # -------------------------------------------------------------------------
+    # BUG-CA-1 FIX: warm up dynamic caches before evaluation
+    # -------------------------------------------------------------------------
+
+    def _warmup_cache(self, cache, zipf_probs: np.ndarray, seed: int):
+        """
+        Warm up LRU / LFU / Random caches before evaluation.
+
+        BUG-CA-1 fix:
+            Fresh empty dynamic caches were never populated before the
+            Monte Carlo loop, so is_hit() always returned False and hit
+            rate was 0.0 for every policy except TopK.
+
+            We feed CACHE_SIZE * 10 Zipf-sampled requests through
+            is_hit(update_stats=True) so the cache fills up and LRU/LFU
+            counters are primed before evaluation begins.
+
+        StaticTopKCache is populated via populate() in setup_cache().
+        DQNCache is handled separately in _reset_dqn_for_eval().
+        """
+        if cache is None:
+            return
+        if isinstance(cache, StaticTopKCache):
+            return
+        if HAS_DQN and isinstance(cache, DQNCache):
+            return
+
+        rng = np.random.default_rng(seed)
+        warmup_requests = rng.choice(
+            self.cfg.NUM_FILES,
+            size=self.cfg.CACHE_SIZE * 10,
+            p=zipf_probs
+        )
+        for file_id in warmup_requests:
+            cache.is_hit(int(file_id), update_stats=True)
+
+    # -------------------------------------------------------------------------
+    # BUG-CA-4 FIX (root cause): reset + refill DQN cache between SNR points
+    # -------------------------------------------------------------------------
+
+    def _reset_dqn_for_eval(self, zipf_probs: np.ndarray, seed: int):
+        """
+        Reset and re-warm the DQN cache for a new SNR evaluation point.
+
+        BUG-CA-4 root-cause fix:
+            _select_action() and _execute_action() are called exclusively
+            inside _learn_from_request(), which is guarded by:
+
+                if not self.eval_mode:
+                    self._learn_from_request(...)
+
+            So calling request() while eval_mode=True silently skips
+            ALL insertion logic — clear() empties the cache and it stays
+            empty forever, giving 0.0 cache hit rate.
+
+            Fix:
+              1. clear()               — flush stale contents
+              2. set_eval_mode(False)  — re-enable _execute_action path
+              3. request() loop        — fill cache via trained Q-network
+                                         (epsilon=0 in eval mode was saved,
+                                          so greedy policy is used)
+              4. set_eval_mode(True)   — restore no-learning / no-exploration
+              5. reset_stats()         — discard warmup hit/miss counters
+        """
+        cache = self.trained_dqn_cache
+        if cache is None:
+            return
+
+        # Step 1: flush stale files from the previous SNR point
+        cache.clear()
+
+        # Step 2: temporarily disable eval mode so _execute_action fires
+        cache.set_eval_mode(False)
+        # Force epsilon to 0 so the greedy trained policy is used,
+        # not the exploration epsilon that was active during training.
+        cache.epsilon = 0.0
+
+        # Step 3: refill via DQN inference
+        rng = np.random.default_rng(seed)
+        warmup_requests = rng.choice(
+            self.cfg.NUM_FILES,
+            size=self.cfg.CACHE_SIZE * 10,
+            p=zipf_probs
+        )
+        for file_id in warmup_requests:
+            cache.request(int(file_id))
+
+        # Step 4: re-engage eval mode (also sets epsilon=0 via set_eval_mode)
+        cache.set_eval_mode(True)
+
+        # Step 5: clear warmup counters so evaluation stats start clean
+        cache.reset_stats()
+
+    def setup_cache(self, policy: str, requests: np.ndarray = None,
+                    zipf_probs: np.ndarray = None,
+                    warmup_seed: int = 0) -> Optional[object]:
         """
         Create cache instance for given policy.
         
         ✅ FIXED: Uses trained DQN if available
+
+        BUG-CA-1 fix: passes zipf_probs to _warmup_cache() for LRU/LFU/Random.
+        BUG-CA-4 fix: calls _reset_dqn_for_eval() for DQN policy.
         """
         if policy is None or policy == 'none':
             return None
@@ -292,6 +424,9 @@ class CacheAidedNOMAAnalysis:
             if self.trained_dqn_cache is None:
                 print("⚠️  Warning: DQN requested but no trained cache available")
                 return None
+            # BUG-CA-4 FIX: flush + request()-based warmup each SNR point
+            if zipf_probs is not None:
+                self._reset_dqn_for_eval(zipf_probs, seed=warmup_seed)
             # Return the pre-trained DQN cache (already in eval mode)
             return self.trained_dqn_cache
         
@@ -303,6 +438,9 @@ class CacheAidedNOMAAnalysis:
             cnt = Counter(requests)
             ranking = [item for item, _ in cnt.most_common()]
             cache.populate(ranking)
+        elif zipf_probs is not None:
+            # BUG-CA-1 FIX: warm up LRU / LFU / Random caches
+            self._warmup_cache(cache, zipf_probs, seed=warmup_seed)
         
         return cache
     
@@ -381,6 +519,10 @@ class CacheAidedNOMAAnalysis:
         # SIC/CIC Simulation
         sinr_threshold = sinr_threshold_from_rate(self.cfg.TARGET_RATE_BPS)
         
+        # BUG-CA-2 FIX: pass PARTNER file cache status to simulate_sic_process().
+        # weak_cached means the STRONG user's file is cached (gives CIC to weak).
+        # strong_cached means the WEAK user's file is cached (gives CIC to strong).
+        # Previously both flags used own-file status, which is physically incorrect.
         sic_results = simulate_sic_process(
             P_tx=self.cfg.TX_POWER,
             p_weak=p_weak,
@@ -390,8 +532,8 @@ class CacheAidedNOMAAnalysis:
             noise=noise_power,
             target_sinr=sinr_threshold,
             imperfection_factor=self.cfg.SIC_IMPERFECTION,
-            weak_cached=cache_hit_weak,
-            strong_cached=cache_hit_strong
+            weak_cached=cache_hit_strong,    # BUG-CA-2 FIX: partner's file
+            strong_cached=cache_hit_weak     # BUG-CA-2 FIX: partner's file
         )
         
         weak_success = sic_results['weak_success']
@@ -410,6 +552,10 @@ class CacheAidedNOMAAnalysis:
         else:
             rate_strong = sic_results['rate_s'] if strong_success else 0.0
         
+        # BUG-CA-3 FIX: recompute sum_rate from the (possibly overridden) rates.
+        # sic_results['sum_rate'] does not account for cache_rate substitutions.
+        sum_rate = rate_weak + rate_strong
+
         # Outage Detection
         outage_weak = 0 if (cache_hit_weak or weak_success) else 1
         outage_strong = 0 if (cache_hit_strong or strong_success) else 1
@@ -444,7 +590,7 @@ class CacheAidedNOMAAnalysis:
             'sinr_strong': sic_results['sinr_s_after'],
             'rate_weak': rate_weak,
             'rate_strong': rate_strong,
-            'sum_rate': sic_results['sum_rate'],
+            'sum_rate': sum_rate,            # BUG-CA-3 FIX
             'outage_weak': outage_weak,
             'outage_strong': outage_strong,
             'ber_weak': ber_weak,
@@ -467,17 +613,20 @@ class CacheAidedNOMAAnalysis:
             self.cfg.ZIPF_ALPHA,
             size=self.cfg.NUM_USERS * self.cfg.REQUESTS_PER_USER
         )
-        
-        # Setup cache
-        cache = self.setup_cache(policy, requests)
-        
-        # Storage for per-realization metrics
-        metrics = defaultdict(list)
-        
-        # Zipf probability distribution
+
+        # Zipf probability distribution (shared by warmup and evaluation)
         ranks = np.arange(1, self.cfg.NUM_FILES + 1)
         zipf_weights = 1.0 / np.power(ranks, self.cfg.ZIPF_ALPHA)
         zipf_probs = zipf_weights / zipf_weights.sum()
+        
+        # Setup cache (BUG-CA-1 / BUG-CA-4 fix: pass zipf_probs and warmup_seed)
+        warmup_seed = self.cfg.RANDOM_SEED + seed_offset
+        cache = self.setup_cache(policy, requests,
+                                 zipf_probs=zipf_probs,
+                                 warmup_seed=warmup_seed)
+        
+        # Storage for per-realization metrics
+        metrics = defaultdict(list)
         
         # Monte Carlo simulations
         for i in range(self.num_realizations):
@@ -486,9 +635,10 @@ class CacheAidedNOMAAnalysis:
             # Generate channels
             gain_weak, gain_strong, noise_power = self.generate_user_pair_channels(snr_db, seed)
             
-            # Sample file requests
-            file_weak = np.random.choice(self.cfg.NUM_FILES, p=zipf_probs)
-            file_strong = np.random.choice(self.cfg.NUM_FILES, p=zipf_probs)
+            # Sample file requests (deterministic per seed for reproducibility)
+            rng = np.random.default_rng(seed)
+            file_weak = int(rng.choice(self.cfg.NUM_FILES, p=zipf_probs))
+            file_strong = int(rng.choice(self.cfg.NUM_FILES, p=zipf_probs))
             
             # Simulate transmission
             result = self.simulate_noma_transmission(
@@ -794,9 +944,11 @@ class CacheAidedNOMAAnalysis:
             print(f"⚠️  Warning: Could not generate summary: {e}")
 
 
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
+
 
 def main():
     """
@@ -882,6 +1034,7 @@ def main():
         print("  • models/dqn_cache/dqn_cache_final.pth (DQN checkpoint)")
     
     print("\n")
+
 
 
 if __name__ == "__main__":

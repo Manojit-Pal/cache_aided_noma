@@ -6,45 +6,45 @@ Performance at SNR = 30 dB:
 ----------------------------------------------------------------------
 
 TOPK:
-  Sum-Rate: 15.0854 bps/Hz
-  Outage Prob: 0.007500
-  Cache Hit Rate: 0.7145
-  Fairness: 0.8898
-  Energy Efficiency: 15.36 bits/J
+  Sum-Rate: 18.1814 bps/Hz
+  Outage Prob: 0.006000
+  Cache Hit Rate: 0.7130
+  Fairness: 0.9573
+  Energy Efficiency: 18.40 bits/J
 
 LRU:
-  Sum-Rate: 13.4706 bps/Hz
-  Outage Prob: 0.015000
-  Cache Hit Rate: 0.6050
-  Fairness: 0.8467
-  Energy Efficiency: 10.88 bits/J
+  Sum-Rate: 17.1510 bps/Hz
+  Outage Prob: 0.013000
+  Cache Hit Rate: 0.6225
+  Fairness: 0.9312
+  Energy Efficiency: 14.15 bits/J
 
 LFU:
-  Sum-Rate: 13.5798 bps/Hz
-  Outage Prob: 0.013500
-  Cache Hit Rate: 0.6150
-  Fairness: 0.8486
-  Energy Efficiency: 11.11 bits/J
+  Sum-Rate: 17.7665 bps/Hz
+  Outage Prob: 0.009500
+  Cache Hit Rate: 0.6675
+  Fairness: 0.9476
+  Energy Efficiency: 16.01 bits/J
 
 RANDOM:
-  Sum-Rate: 12.6863 bps/Hz
+  Sum-Rate: 16.6032 bps/Hz
   Outage Prob: 0.018500
-  Cache Hit Rate: 0.5555
-  Fairness: 0.8266
-  Energy Efficiency: 9.26 bits/J
+  Cache Hit Rate: 0.5660
+  Fairness: 0.9182
+  Energy Efficiency: 12.14 bits/J
 
 NO-CACHE:
-  Sum-Rate: 5.6350 bps/Hz
+  Sum-Rate: 5.5931 bps/Hz
   Outage Prob: 0.085000
   Cache Hit Rate: 0.0000
   Fairness: 0.6263
-  Energy Efficiency: 2.82 bits/J
+  Energy Efficiency: 2.80 bits/J
 
 DQN (trained):
-  Sum-Rate: 15.0271 bps/Hz
-  Outage Prob: 0.008000
-  Cache Hit Rate: 0.7110
-  Fairness: 0.8883
-  Energy Efficiency: 15.18 bits/J
+  Sum-Rate: 16.9123 bps/Hz
+  Outage Prob: 0.016000
+  Cache Hit Rate: 0.5990
+  Fairness: 0.9259
+  Energy Efficiency: 13.21 bits/J
 
 ======================================================================

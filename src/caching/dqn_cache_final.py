@@ -4,28 +4,33 @@ src/caching/dqn_cache_final.py
 NOMA-AWARE DEEP Q-NETWORK CACHE
 ===============================
 
-Implementation based on research papers:
+Implementation based on:
 - IEEE DeepChunk (2019): Deep Q-Learning for Chunk-based Caching
 - RLCaR: Reinforcement Learning Cache Replacement
-- peihaowang/DRLCache: Deep RL-based Cache Replacement
+- Wang et al. (2016): Dueling DQN architecture
+- Schaul et al. (2016): Prioritized Experience Replay
 
-Key NOMA Features:
-- CIC (Cache-aided Interference Cancellation) tracking
-- SIC (Successive Interference Cancellation) detection  
-- Channel-aware state representation
-- NOMA performance-based rewards
-- User pairing integration
+2026 Bug Fix Log:
+- BUG-1  (CRITICAL): Replaced last_state/last_action pattern with
+  pending_transitions dict for correct deferred reward assignment.
+- BUG-3  (CRITICAL): EMA popularity decays ALL files every step.
+- BUG-4  (MODERATE): O(N^2) _get_state_vector fixed to O(N).
+- BUG-9  (MODERATE): populate() clears pending_transitions.
+- BUG-12 (MODERATE): save/load persists pending_transitions.
+- FIX-3  (HIGH): Reward redesign — outage removed; CIC +2->+3;
+  miss+success neutral (0.0).
+- BUG-DQN-2 (CRITICAL): popularity NaN guard on float32 underflow.
+- BUG-DQN-4 (MODERATE): empty-slot fill uses neutral reward 0.0.
+- DQN-A  (CRITICAL): _update_counters() moved BEFORE
+  _learn_from_request() so all state vectors see fresh LRU/LFU
+  counters instead of one-step-lagged values.
+- DQN-J  (MODERATE): popularity bump moved BEFORE
+  _learn_from_request() so state features reflect current request.
+- DQN-I  (MODERATE): clear() now resets cumulative_reward to 0.0
+  to prevent reward accumulator carry-over between eval runs.
 
 Author: Cache-Aided NOMA Team
-Date: December 2025
-
-Bug Fixes:
-- BUG #1 (CRITICAL): Fixed popularity EMA double-decay error
-- BUG #2 (CRITICAL): Added beta annealing to prioritized replay
-- BUG #3 (MODERATE): Smart sampling strategy (with/without replacement)
-- BUG #4 (MINOR): Proper soft target update every training step
-- BUG #5 (MINOR): Empty slot LRU representation fixed
-- ENHANCEMENT #6: Added warm-up period before training
+Date: December 2025 | Revised: March 2026
 """
 
 import numpy as np
@@ -47,1177 +52,726 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    print("⚠️  PyTorch not available - DQN will use Q-table fallback")
+    print('Warning: PyTorch not available — DQN will use Q-table fallback')
 
 from .cache_base import CacheBase
 
 
-# ====================================================================================
-# DUELING DQN NETWORK (Following DeepMind Architecture)
+# ============================================================================
+# DUELING DQN NETWORK
 # ============================================================================
 
 class DuelingDQN(nn.Module):
     """
-    Dueling DQN Architecture (Wang et al., ICML 2016).
-    
-    Separates Q-function into:
-    - Value function V(s): How good is this state?
-    - Advantage function A(s,a): How much better is action a?
-    
-    Q(s,a) = V(s) + [A(s,a) - mean(A(s,a))]
-    
-    This improves learning by allowing the network to learn which
-    states are valuable independent of specific actions.
+    Dueling DQN (Wang et al., ICML 2016).
+    Q(s,a) = V(s) + [A(s,a) - mean_a A(s,a)]
     """
-    
-    def __init__(self, state_dim: int, action_dim: int, 
+    def __init__(self, state_dim: int, action_dim: int,
                  hidden_dims: List[int] = [128, 64]):
-        super(DuelingDQN, self).__init__()
-        
-        # Shared feature layers
+        super().__init__()
         self.feature_layers = nn.ModuleList()
         prev_dim = state_dim
-        
         for hdim in hidden_dims:
             self.feature_layers.append(nn.Linear(prev_dim, hdim))
             prev_dim = hdim
-        
-        # Value stream V(s)
         self.value_stream = nn.Sequential(
-            nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dims[-1] // 2, 1)
-        )
-        
-        # Advantage stream A(s,a)
+            nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2), nn.ReLU(),
+            nn.Linear(hidden_dims[-1] // 2, 1))
         self.advantage_stream = nn.Sequential(
-            nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dims[-1] // 2, action_dim)
-        )
-        
-        # He initialization for better gradient flow
+            nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2), nn.ReLU(),
+            nn.Linear(hidden_dims[-1] // 2, action_dim))
         self._init_weights()
-    
+
     def _init_weights(self):
-        """Initialize weights with He/Xavier initialization."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-    
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: state -> Q-values for all actions.
-        
-        Q(s,a) = V(s) + [A(s,a) - mean_a(A(s,a))]
-        """
-        # Shared features
+
+    def forward(self, state: 'torch.Tensor') -> 'torch.Tensor':
         x = state
         for layer in self.feature_layers:
             x = F.relu(layer(x))
-        
-        # Separate value and advantage
-        value = self.value_stream(x)  # (batch, 1)
-        advantage = self.advantage_stream(x)  # (batch, action_dim)
-        
-        # Combine: subtract mean advantage for stability
-        q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
-        
-        return q_values
+        value     = self.value_stream(x)
+        advantage = self.advantage_stream(x)
+        return value + (advantage - advantage.mean(dim=1, keepdim=True))
 
 
-# ====================================================================================
-# PRIORITIZED EXPERIENCE REPLAY (Schaul et al., ICLR 2016)
+# ============================================================================
+# PRIORITIZED EXPERIENCE REPLAY
 # ============================================================================
 
 class PrioritizedReplayBuffer:
-    """
-    Prioritized Experience Replay Buffer with Beta Annealing.
-    
-    Samples transitions with probability proportional to TD-error,
-    allowing agent to learn more from surprising experiences.
-    
-    Based on: Schaul et al., "Prioritized Experience Replay", ICLR 2016
-    
-    Key insights:
-    1. Beta should be annealed from initial value to 1.0 over training
-    2. Sampling strategy: use replacement when buffer is small to avoid correlation
-    """
-    
-    def __init__(
-        self, 
-        capacity: int, 
-        alpha: float = 0.6, 
-        beta_start: float = 0.4,
-        beta_end: float = 1.0,
-        beta_frames: int = 100000
-    ):
-        """
-        Args:
-            capacity: Maximum buffer size
-            alpha: Priority exponent (0=uniform, 1=full prioritization)
-            beta_start: Initial importance sampling exponent (lower = more bias, faster learning)
-            beta_end: Final importance sampling exponent (1.0 = no bias, accurate)
-            beta_frames: Number of frames to anneal beta from start to end
-        """
-        self.capacity = capacity
-        self.alpha = alpha
-        
-        # Beta annealing schedule (Schaul et al., 2016)
-        self.beta = beta_start
-        self.beta_start = beta_start
-        self.beta_end = beta_end
-        self.beta_frames = beta_frames
-        self.frame_idx = 0
-        
-        self.buffer = deque(maxlen=capacity)
-        self.priorities = deque(maxlen=capacity)
+    """Prioritized Experience Replay with beta annealing (Schaul et al., 2016)."""
+
+    def __init__(self, capacity: int, alpha: float = 0.6,
+                 beta_start: float = 0.4, beta_end: float = 1.0,
+                 beta_frames: int = 100000):
+        self.capacity     = capacity
+        self.alpha        = alpha
+        self.beta         = beta_start
+        self.beta_start   = beta_start
+        self.beta_end     = beta_end
+        self.beta_frames  = beta_frames
+        self.frame_idx    = 0
+        self.buffer       = deque(maxlen=capacity)
+        self.priorities   = deque(maxlen=capacity)
         self.max_priority = 1.0
-    
+
     def add(self, experience: Dict):
-        """Add experience with max priority (ensures at least one sample)."""
         self.buffer.append(experience)
         self.priorities.append(self.max_priority)
-    
+
     def sample(self, batch_size: int) -> Tuple[List[Dict], np.ndarray, np.ndarray]:
-        """
-        Sample batch with prioritized sampling and smart replacement strategy.
-        
-        Returns:
-            experiences: List of experience dicts
-            weights: Importance sampling weights
-            indices: Sampled indices (for priority updates)
-        """
         if len(self.buffer) < batch_size:
             return None, None, None
-        
-        # ========================================================================
-        # BUG FIX #2: Anneal beta from beta_start to beta_end
-        # ========================================================================
-        # Research: "We linearly anneal β from its initial value β₀ to 1"
-        # - Schaul et al., "Prioritized Experience Replay", ICLR 2016
         self.frame_idx += 1
         self.beta = min(
             self.beta_end,
-            self.beta_start + (self.beta_end - self.beta_start) * (self.frame_idx / self.beta_frames)
-        )
-        
-        # Compute sampling probabilities
+            self.beta_start + (self.beta_end - self.beta_start)
+            * (self.frame_idx / self.beta_frames))
         priorities = np.array(self.priorities, dtype=np.float64)
         probs = priorities ** self.alpha
         probs /= probs.sum()
-        
-        # ========================================================================
-        # BUG FIX #3: Smart sampling strategy
-        # ========================================================================
-        # Research: "Within-minibatch without-replacement sampling is no better
-        # than with-replacement when buffer >> batch"
-        # - arXiv 2503.02269v2, "Experience Replay with Random Reshuffling"
-        #
-        # Problem: When buffer size ≈ batch size, sampling without replacement
-        # causes extreme correlation between consecutive batches
-        #
-        # Solution: Use with-replacement when buffer is relatively small
-        use_replacement = len(self.buffer) < 3 * batch_size
-        
+        use_replace = len(self.buffer) < 3 * batch_size
         try:
-            indices = np.random.choice(
-                len(self.buffer), 
-                batch_size, 
-                p=probs, 
-                replace=use_replacement
-            )
+            indices = np.random.choice(len(self.buffer), batch_size,
+                                       p=probs, replace=use_replace)
         except ValueError:
-            # Fallback: if numerical issues with probabilities, use uniform sampling
-            indices = np.random.choice(len(self.buffer), batch_size, replace=use_replacement)
-        
-        # Compute importance sampling weights with current beta
+            indices = np.random.choice(len(self.buffer), batch_size,
+                                       replace=use_replace)
         weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
-        weights /= weights.max()  # Normalize for stability
-        
-        experiences = [self.buffer[idx] for idx in indices]
-        
-        return experiences, weights, indices
-    
+        weights /= weights.max()
+        return [self.buffer[i] for i in indices], weights, indices
+
     def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray):
-        """Update priorities based on absolute TD-errors."""
-        for idx, error in zip(indices, td_errors):
-            priority = float(abs(error) + 1e-6)
+        for idx, err in zip(indices, td_errors):
+            p = float(abs(err) + 1e-6)
             if 0 <= idx < len(self.priorities):
-                self.priorities[idx] = priority
-                self.max_priority = max(self.max_priority, priority)
-    
+                self.priorities[idx] = p
+                self.max_priority    = max(self.max_priority, p)
+
     def get_beta(self) -> float:
-        """Get current beta value (for logging/debugging)."""
         return self.beta
-    
+
     def __len__(self):
         return len(self.buffer)
 
 
-# ====================================================================================
+# ============================================================================
 # NOMA-AWARE DQN CACHE
 # ============================================================================
 
 class DQNCache(CacheBase):
     """
-    Deep Q-Network Cache for NOMA Systems.
-    
-    **MDP Formulation:**
-    
-    State s_t:
-        - LRU counters: timesteps since last access for each cached file
-        - LFU counters: access frequency for each cached file
-        - Requested file popularity
-        - Channel quality metrics (mean, std)
-        - NOMA performance (CIC rate, success rate)
-        - Cache occupancy
-    
-    Action a_t:
-        - Which cache slot to evict (0 to capacity-1)
-        - Based on research: slot-based actions simplify learning
-    
-    Reward r_t:
-        - +10: Cache hit (best outcome)
-        - +2: Cache miss + CIC enabled (good outcome)
-        - -1: Cache miss + NOMA success (acceptable)
-        - -5: Cache miss + NOMA failure (bad outcome)
-        - -10: Outage (worst outcome)
-    
-    **Research-Based Design Choices:**
-    
-    1. State = LRU + LFU heuristics (RLCaR paper)
-    2. Action = Slot eviction (simplifies action space)
-    3. Reward = Cache hit ratio optimization (standard)
-    4. Network = Dueling DQN (better value estimation)
-    5. Replay = Prioritized (learn from important transitions)
-    6. Target Update = Soft update every training step (DDPG-style)
-    7. Warm-up = Wait for 10x batch_size before training
-    
-    **NOMA Integration:**
-    
-    - CIC tracking: Bonus reward when cache enables interference cancellation
-    - SIC detection: Track when strong user gets perfect SIC
-    - Channel-aware: State includes channel quality
-    - Pairing-aware: Considers NOMA user pairs
+    Deep Q-Network Cache for Cache-Aided NOMA.
+
+    MDP:
+      State  : LRU + LFU counters (per slot) + 6 global features
+      Action : which slot to evict (0 .. capacity-1)
+      Reward : deferred via pending_transitions (see _learn_from_request)
+
+    Reward hierarchy (FIX-3):
+      +10  cache hit on evicted file
+      + 3  miss + CIC enabled
+      +  0  miss + NOMA success (neutral)
+      - 5  miss + NOMA failure
+
+    Call ordering in request() (critical for correct state vectors):
+      1. is_hit()                  — check cache, record stat
+      2. build result dict         — NOMA flags
+      3. update channel/NOMA logs  — history deques
+      4. _update_counters()        — MUST be before step 5 & 6
+      5. popularity update         — MUST be before step 6
+      6. _learn_from_request()     — sees fresh counters + popularity
     """
-    
+
     def __init__(
-        self,
-        capacity: int,
-        num_files: int,
-        num_users: int,
-        
-        # DQN hyperparameters
-        learning_rate: float = 0.0001,
-        gamma: float = 0.99,
-        epsilon_start: float = 1.0,
-        epsilon_end: float = 0.01,
+        self, capacity: int, num_files: int, num_users: int,
+        learning_rate: float = 0.0001, gamma: float = 0.99,
+        epsilon_start: float = 1.0, epsilon_end: float = 0.01,
         epsilon_decay_steps: int = 200000,
-        
-        # Network architecture
         use_neural_network: bool = True,
         hidden_dims: List[int] = [128, 128],
-        
-        # Training parameters
-        batch_size: int = 64,
-        replay_buffer_size: int = 50000,
-        train_freq: int = 4,
-        warm_up_steps: Optional[int] = None,
-        
-        # Prioritized replay
+        batch_size: int = 64, replay_buffer_size: int = 50000,
+        train_freq: int = 4, warm_up_steps: Optional[int] = None,
         use_prioritized_replay: bool = True,
-        priority_alpha: float = 0.6,
-        priority_beta_start: float = 0.4,
-        priority_beta_end: float = 1.0,
-        priority_beta_frames: int = 100000,
-        
-        # Stability
-        gradient_clip: float = 10.0,
-        tau: float = 0.005,
-        
-        # NOMA awareness
-        enable_noma_awareness: bool = True,
-        
-        seed: int = 2025
+        priority_alpha: float = 0.6, priority_beta_start: float = 0.4,
+        priority_beta_end: float = 1.0, priority_beta_frames: int = 100000,
+        gradient_clip: float = 10.0, tau: float = 0.005,
+        enable_noma_awareness: bool = True, seed: int = 2025
     ):
         super().__init__(capacity, enable_noma_awareness)
-        
-        # Environment parameters
-        self.num_files = num_files
-        self.num_users = num_users
-        
-        # Hyperparameters
-        self.lr = learning_rate
-        self.gamma = gamma
-        self.batch_size = batch_size
-        self.train_freq = train_freq
+        self.num_files     = num_files
+        self.num_users     = num_users
+        self.lr            = learning_rate
+        self.gamma         = gamma
+        self.batch_size    = batch_size
+        self.train_freq    = train_freq
         self.gradient_clip = gradient_clip
-        self.tau = tau
-        
-        # ========================================================================
-        # ENHANCEMENT #6: Warm-up period before training
-        # ========================================================================
-        # Research: Most DQN implementations wait for buffer to fill
-        # before training to avoid learning from tiny, biased samples
-        if warm_up_steps is None:
-            self.warm_up_steps = max(10 * batch_size, 1000)
-        else:
-            self.warm_up_steps = warm_up_steps
-        
-        # Set seeds for reproducibility
+        self.tau           = tau
+        self.warm_up_steps = max(10 * batch_size, 1000) if warm_up_steps is None else warm_up_steps
         self._set_seeds(seed)
-        
-        # Epsilon-greedy exploration
-        self.epsilon = epsilon_start
+
+        self.epsilon       = epsilon_start
         self.epsilon_start = epsilon_start
-        self.epsilon_end = epsilon_end
+        self.epsilon_end   = epsilon_end
         self.epsilon_decay = (epsilon_start - epsilon_end) / max(1, epsilon_decay_steps)
-        
-        # Evaluation mode (no exploration)
-        self.eval_mode = False
-        self._eval_epsilon = 0.0
-        
-        # Cache state: list of file IDs in each slot
-        self.cache_slots = [-1] * capacity  # -1 = empty slot
-        self.file_to_slot = {}  # Reverse mapping: file_id -> slot
-        
-        # LRU/LFU counters (for state representation)
-        self.lru_counters = np.zeros(capacity, dtype=np.int32)  # Steps since access
-        self.lfu_counters = np.zeros(capacity, dtype=np.int32)  # Access frequency
-        self.timestep = 0
-        
-        # Popularity tracking (EMA)
-        self.popularity = np.ones(num_files, dtype=np.float32) / num_files
+        self.eval_mode     = False
+
+        self.cache_slots  = [-1] * capacity
+        self.file_to_slot = {}
+        self.lru_counters = np.zeros(capacity, dtype=np.int32)
+        self.lfu_counters = np.zeros(capacity, dtype=np.int32)
+        self.timestep     = 0
+
+        self.popularity       = np.ones(num_files, dtype=np.float32) / num_files
         self.popularity_decay = 0.9
-        
-        # NOMA-specific tracking
+
         self.channel_history = deque(maxlen=500)
-        self.noma_history = deque(maxlen=500)
-        self.cic_count = 0
-        self.sic_count = 0
-        
-        # RL components
-        self.use_nn = use_neural_network and TORCH_AVAILABLE
+        self.noma_history    = deque(maxlen=500)
+        self.cic_count       = 0
+        self.sic_count       = 0
+
+        self.use_nn        = use_neural_network and TORCH_AVAILABLE
         self.training_step = 0
-        
-        # Action space: evict slot i (0 to capacity-1)
-        self.action_dim = capacity
-        
+        self.action_dim    = capacity
+
         if self.use_nn:
-            # State dimension
-            self.state_dim = 2 * capacity + 6  # LRU + LFU + 6 global features
-            
-            # Device
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-            # Q-network and target network
-            self.q_network = DuelingDQN(self.state_dim, self.action_dim, hidden_dims).to(self.device)
+            self.state_dim      = 2 * capacity + 6
+            self.device         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.q_network      = DuelingDQN(self.state_dim, self.action_dim, hidden_dims).to(self.device)
             self.target_network = DuelingDQN(self.state_dim, self.action_dim, hidden_dims).to(self.device)
             self.target_network.load_state_dict(self.q_network.state_dict())
             self.target_network.eval()
-            
-            # Optimizer (Adam with weight decay for regularization)
-            self.optimizer = optim.Adam(
-                self.q_network.parameters(), 
-                lr=self.lr, 
-                weight_decay=1e-5
-            )
-            
-            # Experience replay with beta annealing
+            self.optimizer = optim.Adam(self.q_network.parameters(),
+                                        lr=self.lr, weight_decay=1e-5)
             if use_prioritized_replay:
-                self.replay_buffer = PrioritizedReplayBuffer(
-                    capacity=replay_buffer_size,
-                    alpha=priority_alpha,
-                    beta_start=priority_beta_start,
-                    beta_end=priority_beta_end,
-                    beta_frames=priority_beta_frames
-                )
+                self.replay_buffer   = PrioritizedReplayBuffer(
+                    replay_buffer_size, priority_alpha,
+                    priority_beta_start, priority_beta_end, priority_beta_frames)
                 self.use_prioritized = True
             else:
-                self.replay_buffer = deque(maxlen=replay_buffer_size)
+                self.replay_buffer   = deque(maxlen=replay_buffer_size)
                 self.use_prioritized = False
         else:
-            # Q-table fallback
-            self.q_table = defaultdict(lambda: np.zeros(self.action_dim))
-            self.replay_buffer = None
+            self.q_table         = defaultdict(lambda: np.zeros(self.action_dim))
+            self.replay_buffer   = None
             self.use_prioritized = False
-        
-        # Training metrics
-        self.episode_rewards = []
-        self.losses = []
+
+        self.episode_rewards   = []
+        self.losses            = []
         self.cumulative_reward = 0.0
-        
-        # For credit assignment
-        self.last_state = None
-        self.last_action = None
-        
-        print(f"✅ DQNCache initialized")
-        print(f"   Mode: {'Neural Network (DQN)' if self.use_nn else 'Q-table'}")
-        print(f"   State dim: {self.state_dim if self.use_nn else 'N/A'}")
-        print(f"   Action dim: {self.action_dim}")
-        print(f"   Device: {self.device if self.use_nn else 'CPU'}")
-        print(f"   NOMA-aware: {self.enable_noma_awareness}")
-        print(f"   Warm-up steps: {self.warm_up_steps}")
-        if self.use_prioritized:
-            print(f"   PER beta: {priority_beta_start:.2f} → {priority_beta_end:.2f} over {priority_beta_frames} frames")
-    
+        self.pending_transitions: Dict[int, Dict] = {}
+
+        print('DQNCache initialized')
+        print(f'  Mode      : {"Neural Network (DQN)" if self.use_nn else "Q-table"}')
+        print(f'  Warm-up   : {self.warm_up_steps} steps')
+        print(f'  Fixes     : DQN-A/J (call order), DQN-I (clear reset), '
+              f'BUG-DQN-2 (NaN guard), BUG-DQN-4 (neutral fill reward)')
+
     def _set_seeds(self, seed: int):
-        """Set random seeds for reproducibility."""
         random.seed(seed)
         np.random.seed(seed)
         if TORCH_AVAILABLE:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
-    
-    # ========================================================================
-    # STATE REPRESENTATION (Following RLCaR Paper)
-    # ========================================================================
-    
+
+    # -------------------------------------------------------------------------
+    # STATE (O(N))
+    # -------------------------------------------------------------------------
     def _get_state_vector(self, requested_file: int) -> np.ndarray:
-        """
-        Construct state vector from cache status.
-        
-        State components (following RLCaR paper):
-        1. LRU counters (capacity values): timesteps since last access
-        2. LFU counters (capacity values): access frequency
-        3. Requested file popularity (1 value)
-        4. Cache occupancy (1 value)
-        5. Mean channel gain (1 value)
-        6. Std channel gain (1 value)
-        7. CIC success rate (1 value)
-        8. NOMA success rate (1 value)
-        
-        Total: 2*capacity + 6 dimensions
-        """
-        state = []
-        
-        # ========================================================================
-        # BUG FIX #5: Proper empty slot representation
-        # ========================================================================
-        # Problem: Empty slots (cache_slots[i] = -1) accumulate huge LRU values
-        # Solution: Use special marker -1.0 for empty slots
-        
-        # 1. LRU counters with empty slot handling
-        occupied_mask = np.array([slot != -1 for slot in self.cache_slots])
-        
+        state    = []
+        occupied = np.array([s != -1 for s in self.cache_slots], dtype=bool)
+        has_occ  = occupied.any()
+        max_lru  = max(int(self.lru_counters[occupied].max()), 1) if has_occ else 1
+        max_lfu  = max(int(self.lfu_counters[occupied].max()), 1) if has_occ else 1
+
         for i in range(self.capacity):
-            if self.cache_slots[i] == -1:
-                # Empty slot: use -1.0 as special marker
-                state.append(-1.0)
-            else:
-                # Normalize LRU only among occupied slots
-                if occupied_mask.any():
-                    occupied_lru = self.lru_counters[occupied_mask]
-                    max_lru = max(occupied_lru.max(), 1)
-                    state.append(float(self.lru_counters[i] / max_lru))
-                else:
-                    state.append(0.0)
-        
-        # 2. LFU counters (empty slots have LFU=0, normalize separately)
+            state.append(-1.0 if not occupied[i] else float(self.lru_counters[i] / max_lru))
         for i in range(self.capacity):
-            if self.cache_slots[i] == -1:
-                state.append(0.0)  # Empty slot
-            else:
-                if occupied_mask.any():
-                    occupied_lfu = self.lfu_counters[occupied_mask]
-                    max_lfu = max(occupied_lfu.max(), 1)
-                    state.append(float(self.lfu_counters[i] / max_lfu))
-                else:
-                    state.append(0.0)
-        
-        # 3. Requested file popularity
+            state.append( 0.0 if not occupied[i] else float(self.lfu_counters[i] / max_lfu))
+
         state.append(float(self.popularity[requested_file]))
-        
-        # 4. Cache occupancy
-        occupied = np.sum(occupied_mask)
-        state.append(float(occupied / self.capacity))
-        
-        # 5-6. Channel quality
-        if len(self.channel_history) > 0:
-            recent_channels = list(self.channel_history)[-100:]
-            state.append(float(np.mean(recent_channels)))
-            state.append(float(np.std(recent_channels)))
+        state.append(float(occupied.sum() / self.capacity))
+
+        if self.channel_history:
+            ch = list(self.channel_history)[-100:]
+            state.extend([float(np.mean(ch)), float(np.std(ch))])
         else:
-            state.extend([0.5, 0.1])  # Default values
-        
-        # 7-8. NOMA performance (if NOMA-aware)
-        if self.enable_noma_awareness and len(self.noma_history) > 0:
-            recent_noma = list(self.noma_history)[-100:]
-            cic_rate = sum(1 for x in recent_noma if x.get('cic', False)) / len(recent_noma)
-            success_rate = sum(1 for x in recent_noma if x.get('success', False)) / len(recent_noma)
-            state.append(float(cic_rate))
-            state.append(float(success_rate))
+            state.extend([0.5, 0.1])
+
+        if self.enable_noma_awareness and self.noma_history:
+            nh = list(self.noma_history)[-100:]
+            state.append(float(sum(1 for x in nh if x.get('cic',     False)) / len(nh)))
+            state.append(float(sum(1 for x in nh if x.get('success', False)) / len(nh)))
         else:
             state.extend([0.0, 0.5])
-        
+
         return np.array(state, dtype=np.float32)
-    
-    # ========================================================================
-    # ACTION SELECTION (Epsilon-Greedy)
-    # ========================================================================
-    
+
+    # -------------------------------------------------------------------------
+    # ACTION SELECTION
+    # -------------------------------------------------------------------------
     def _select_action(self, state: np.ndarray, file_id: int) -> int:
-        """
-        Epsilon-greedy action selection.
-        
-        Returns:
-            action: slot index to evict (0 to capacity-1), or -1 for no action
-        """
-        # If file already cached, no action needed
         if file_id in self.file_to_slot:
-            return -1  # Signal: no eviction needed
-        
-        # Find available slots
-        empty_slots = [i for i, f in enumerate(self.cache_slots) if f == -1]
-        
-        # If cache not full, fill empty slot (no eviction)
-        if empty_slots:
-            return empty_slots[0]  # Use first empty slot
-        
-        # Cache is full: need to evict
-        
-        # Epsilon-greedy
-        if random.random() < self.epsilon:
-            # Exploration: random eviction
-            return random.randint(0, self.capacity - 1)
-        else:
-            # Exploitation: best action from Q-network/table
+            return -1
+        empty = [i for i, f in enumerate(self.cache_slots) if f == -1]
+        if empty:
+            return empty[0]
+        if self.eval_mode or random.random() >= self.epsilon:
             if self.use_nn:
                 with torch.no_grad():
-                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                    q_values = self.q_network(state_tensor).cpu().numpy()[0]
-                    return int(np.argmax(q_values))
+                    t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                    return int(self.q_network(t).cpu().numpy()[0].argmax())
             else:
-                # Q-table fallback
-                state_key = self._discretize_state(state)
-                q_values = self.q_table[state_key]
-                return int(np.argmax(q_values))
-    
+                return int(self.q_table[self._discretize_state(state)].argmax())
+        return random.randint(0, self.capacity - 1)
+
     def _discretize_state(self, state: np.ndarray) -> str:
-        """
-        Discretize continuous state for Q-table (fallback mode).
-        
-        Maps continuous values to discrete bins: Low/Medium/High
-        """
-        # Use only first 10 features for simplicity
-        key_features = state[:min(10, len(state))]
-        
         bins = []
-        for val in key_features:
-            if val < 0.0:  # Empty slot marker
-                bins.append('E')
-            elif val < 0.33:
-                bins.append('L')
-            elif val < 0.67:
-                bins.append('M')
-            else:
-                bins.append('H')
-        
+        for v in state[:min(10, len(state))]:
+            bins.append('E' if v < 0 else 'L' if v < 0.33 else 'M' if v < 0.67 else 'H')
         return ''.join(bins)
-    
-    # ========================================================================
-    # REWARD FUNCTION (NOMA-Aware)
-    # ========================================================================
-    
+
+    # -------------------------------------------------------------------------
+    # REWARD (FIX-3)
+    # -------------------------------------------------------------------------
     def _compute_reward(
-        self,
-        cache_hit: bool,
-        cic_enabled: bool = False,
-        noma_success: bool = True,
-        outage: bool = False,
+        self, cache_hit: bool, cic_enabled: bool = False,
+        noma_success: bool = True, outage: bool = False,
         ber: Optional[float] = None
     ) -> float:
         """
-        NOMA-aware reward function.
-        
-        Reward structure:
-        +10: Cache hit (best - no transmission needed)
-        +2:  Cache miss + CIC enabled (good - interference cancelled)
-        -1:  Cache miss + NOMA success (acceptable - delivered via NOMA)
-        -5:  Cache miss + NOMA failure (bad - poor QoS)
-        -10: Outage (worst - no communication)
-        
-        Additional modifiers:
-        +1: Very low BER (< 1e-4)
-        -2: High BER (> 1e-2)
+        Deferred reward for eviction decisions.
+        Outage excluded (channel quality independent of caching choice).
         """
-        if cache_hit:
-            return 10.0
-        
-        # Cache miss cases
-        if outage:
-            return -10.0
-        
-        if not noma_success:
-            return -5.0
-        
-        # NOMA succeeded
-        if cic_enabled:
-            if cfg_module:
-                reward = cfg_module.RL_REWARD_CIC_ENABLED
-            else:
-                reward = 7.0  # Default fallback
-        else:
-            reward = -1.0  # Standard NOMA delivery (no CIC)
-
-        
-        # BER-based bonus/penalty
+        if cache_hit:        return 10.0
+        if not noma_success: return -5.0
+        reward = 3.0 if cic_enabled else 0.0
         if ber is not None:
-            if ber < 1e-4:
-                reward += 1.0  # Excellent quality
-            elif ber > 1e-2:
-                reward -= 2.0  # Poor quality
-        
+            if   ber < 1e-4: reward += 1.0
+            elif ber > 1e-2: reward -= 2.0
         return reward
-    
-    # ========================================================================
-    # MAIN REQUEST INTERFACE (NOMA-Aware)
-    # ========================================================================
-    
+
+    # -------------------------------------------------------------------------
+    # MAIN REQUEST
+    # -------------------------------------------------------------------------
     def request(
-        self,
-        item: int,
-        user_id: Optional[int] = None,
+        self, item: int, user_id: Optional[int] = None,
         channel_gain: Optional[float] = None,
-        paired_user: Optional[int] = None,
-        paired_file: Optional[int] = None,
-        noma_success: bool = True,
-        outage: bool = False,
+        paired_user: Optional[int] = None, paired_file: Optional[int] = None,
+        noma_success: bool = True, outage: bool = False,
         ber: Optional[float] = None,
-        sinr_weak: Optional[float] = None,
-        sinr_strong: Optional[float] = None,
+        sinr_weak: Optional[float] = None, sinr_strong: Optional[float] = None,
         episode_done: bool = False
     ) -> Dict:
         """
-        NOMA-aware request handling with DQN learning.
-        
-        This is the main entry point for simulations.
-        
-        Args:
-            item: Requested file ID
-            user_id: Requesting user ID
-            channel_gain: User's channel gain
-            paired_user: NOMA paired user ID
-            paired_file: File requested by paired user
-            noma_success: Whether NOMA transmission succeeded
-            outage: Whether outage occurred
-            ber: Bit error rate
-            sinr_weak: Weak user SINR
-            sinr_strong: Strong user SINR
-            episode_done: Whether this is the last request in episode
-        
-        Returns:
-            Dict with cache hit status and NOMA benefits
+        Handle one file request with NOMA-aware DQN learning.
+
+        Critical call ordering (DQN-A / DQN-J fix):
+          _update_counters() and popularity bump happen BEFORE
+          _learn_from_request() so all _get_state_vector() calls
+          inside the learning step see fresh, up-to-date cache state.
         """
-        # Update timestep
         self.timestep += 1
-        
-        # Check cache hit
-        cache_hit = self.is_hit(item, update_stats=True)
-        
-        # Get NOMA information using base class method
-        result = super().request(item, user_id, channel_gain, paired_user, paired_file)
-        
-        # Update tracking
+        cache_hit     = self.is_hit(item, update_stats=True)
+        paired_cached = (
+            self.is_hit(paired_file, update_stats=False)
+            if paired_file is not None else False
+        )
+
+        result = {
+            'hit': cache_hit, 'cic_enabled': False,
+            'paired_user_cached': paired_cached,
+            'weak_user_benefit': False, 'strong_user_benefit': False,
+            'cache_size': len(self),
+        }
+        if self.enable_noma_awareness and paired_file is not None:
+            if paired_cached:
+                result['weak_user_benefit'] = True
+                result['cic_enabled']       = True
+                self.cic_opportunities     += 1
+            if cache_hit:
+                result['strong_user_benefit'] = True
+                result['cic_enabled']         = True
+                self.noma_paired_hits        += 1
+
+        if user_id is not None and channel_gain is not None:
+            self.channel_gains[user_id] = channel_gain
+        if user_id is not None and paired_user is not None:
+            self.user_pairings[user_id] = paired_user
         if channel_gain is not None:
             self.channel_history.append(float(channel_gain))
-        
         if self.enable_noma_awareness:
-            self.noma_history.append({
-                'cic': result['cic_enabled'],
-                'success': noma_success,
-                'sinr_weak': sinr_weak,
-                'sinr_strong': sinr_strong
-            })
-            
-            if result['cic_enabled']:
-                self.cic_count += 1
-            if result['strong_user_benefit']:
-                self.sic_count += 1
-        
-        # DQN learning
-        self._learn_from_request(
-            file_id=item,
-            cache_hit=cache_hit,
-            cic_enabled=result['cic_enabled'],
-            noma_success=noma_success,
-            outage=outage,
-            ber=ber,
-            episode_done=episode_done
-        )
-        
-        # Update LRU/LFU counters
+            self.noma_history.append({'cic': result['cic_enabled'],
+                                      'success': noma_success,
+                                      'sinr_weak': sinr_weak,
+                                      'sinr_strong': sinr_strong})
+            if result['cic_enabled']:         self.cic_count += 1
+            if result['strong_user_benefit']: self.sic_count += 1
+
+        # ── DQN-A FIX: update LRU/LFU counters BEFORE _learn_from_request()
+        # so every _get_state_vector() call inside learning sees the
+        # post-request cache state (hit-slot LRU reset, miss insertion).
         self._update_counters(item, cache_hit)
-        
-        # ========================================================================
-        # BUG FIX #1: Correct EMA popularity update (removed double-decay)
-        # ========================================================================
-        # Standard EMA: p[i] = decay * p[i] + (1 - decay) * 1.0 for accessed item
-        # Others naturally decay through normalization
-        self.popularity[item] = (
-            self.popularity_decay * self.popularity[item]
-            + (1.0 - self.popularity_decay)
-        )
-        # Normalize to maintain probability distribution
-        self.popularity /= self.popularity.sum()
-        
+
+        # ── DQN-J FIX: update popularity BEFORE _learn_from_request()
+        # so popularity[item] in state vectors reflects the current request.
+        self.popularity *= self.popularity_decay
+        self.popularity[item] += (1.0 - self.popularity_decay)
+        # BUG-DQN-2 FIX: guard float32 underflow → NaN
+        total = self.popularity.sum()
+        if total > 1e-30:
+            self.popularity /= total
+        else:
+            self.popularity = np.ones(self.num_files, dtype=np.float32) / self.num_files
+
+        if not self.eval_mode:
+            self._learn_from_request(
+                file_id=item, cache_hit=cache_hit,
+                cic_enabled=result['cic_enabled'],
+                noma_success=noma_success, outage=outage,
+                ber=ber, episode_done=episode_done)
+
         return result
-    
+
+    # -------------------------------------------------------------------------
+    # DEFERRED CREDIT ASSIGNMENT
+    # -------------------------------------------------------------------------
     def _learn_from_request(
-        self,
-        file_id: int,
-        cache_hit: bool,
-        cic_enabled: bool,
-        noma_success: bool,
-        outage: bool,
-        ber: Optional[float],
-        episode_done: bool
+        self, file_id: int, cache_hit: bool, cic_enabled: bool,
+        noma_success: bool, outage: bool, ber: Optional[float], episode_done: bool
     ):
         """
-        DQN learning loop with proper credit assignment.
-        
-        Flow:
-        1. Get current state s_t
-        2. Compute reward r_t for previous action a_{t-1}
-        3. Store transition (s_{t-1}, a_{t-1}, r_t, s_t, done)
-        4. Select new action a_t
-        5. Execute action (update cache)
-        6. Train network (if time)
+        DQN update using deferred pending_transitions.
+
+        By the time this is called, _update_counters() and popularity
+        have already been updated in request(), so all
+        _get_state_vector() calls here see the correct post-request
+        cache state (DQN-A / DQN-J fix).
         """
-        # Get current state
-        current_state = self._get_state_vector(file_id)
-        
-        # Compute reward
-        reward = self._compute_reward(cache_hit, cic_enabled, noma_success, outage, ber)
-        self.cumulative_reward += reward
-        
-        # Store experience from PREVIOUS action (only if a valid action was taken)
-        if self.last_state is not None and self.last_action is not None and self.last_action >= 0:
-            experience = {
-                'state': self.last_state,
-                'action': self.last_action,
-                'reward': reward,
-                'next_state': current_state,
-                'done': episode_done
-            }
-            
-            if self.use_nn and self.replay_buffer is not None:
-                if self.use_prioritized:
-                    self.replay_buffer.add(experience)
-                else:
-                    self.replay_buffer.append(experience)
-            elif not self.use_nn:
-                self._update_q_table(experience)
-        
-        # Select action for CURRENT request (only if miss)
-        action = -1
+        # Resolve deferred reward for file_id if it was previously evicted
+        if file_id in self.pending_transitions:
+            pending = self.pending_transitions.pop(file_id)
+            reward  = self._compute_reward(
+                cache_hit=cache_hit, cic_enabled=cic_enabled,
+                noma_success=noma_success, outage=outage, ber=ber)
+            self._push_to_buffer({
+                'state':      pending['state'],
+                'action':     pending['action'],
+                'reward':     reward,
+                'next_state': self._get_state_vector(file_id),  # fresh state
+                'done':       episode_done,
+            })
+            self.cumulative_reward += reward
+
         if not cache_hit:
-            action = self._select_action(current_state, file_id)
-            
-            # Execute action (update cache) if valid
+            empty_slots  = [i for i, f in enumerate(self.cache_slots) if f == -1]
+            cache_full   = len(empty_slots) == 0
+            state_before = self._get_state_vector(file_id)  # fresh state
+            action       = self._select_action(state_before, file_id)
+
             if action >= 0:
-                self._execute_action(action, file_id)
-        
-        # Save for next iteration ONLY if a valid action was taken
-        if action >= 0:
-            self.last_state = current_state
-            self.last_action = action
-        
-        # Training
-        if not self.eval_mode:
-            self.training_step += 1
-            
-            # ====================================================================
-            # ENHANCEMENT #6: Warm-up period
-            # ====================================================================
-            # Wait for buffer to fill before training
-            if len(self.replay_buffer) < self.warm_up_steps:
-                pass  # Skip training during warm-up
-            
-            # Train network periodically
-            elif self.use_nn and self.training_step % self.train_freq == 0:
-                if len(self.replay_buffer) >= self.batch_size:
-                    self._train_step()
-            
-            # Decay epsilon
-            if self.epsilon > self.epsilon_end:
-                self.epsilon = max(self.epsilon_end, self.epsilon - self.epsilon_decay)
-        
-        # Episode reset
+                if cache_full:
+                    evicted_file = self.cache_slots[action]
+                    self._execute_action(action, file_id)
+                    state_after = self._get_state_vector(file_id)
+                    if evicted_file != -1:
+                        if evicted_file in self.pending_transitions:
+                            old = self.pending_transitions.pop(evicted_file)
+                            self._push_to_buffer({
+                                'state':      old['state'],
+                                'action':     old['action'],
+                                'reward':     0.0,
+                                'next_state': state_before,
+                                'done':       False,
+                            })
+                        self.pending_transitions[evicted_file] = {
+                            'state':  state_before,
+                            'action': action,
+                            'next_state': state_after,
+                        }
+                else:
+                    # BUG-DQN-4 FIX: filling an empty slot is neutral —
+                    # no eviction trade-off, use reward=0.0.
+                    self._execute_action(action, file_id)
+                    state_after = self._get_state_vector(file_id)
+                    self._push_to_buffer({
+                        'state':      state_before,
+                        'action':     action,
+                        'reward':     0.0,
+                        'next_state': state_after,
+                        'done':       episode_done,
+                    })
+
+        self.training_step += 1
+        buf_len = len(self.replay_buffer) if self.replay_buffer is not None else 0
+        if (self.use_nn
+                and buf_len >= self.warm_up_steps
+                and self.training_step % self.train_freq == 0
+                and buf_len >= self.batch_size):
+            self._train_step()
+
+        if not self.eval_mode and self.epsilon > self.epsilon_end:
+            self.epsilon = max(self.epsilon_end, self.epsilon - self.epsilon_decay)
+
         if episode_done:
-            self.last_state = None
-            self.last_action = None
             self.episode_rewards.append(self.cumulative_reward)
             self.cumulative_reward = 0.0
-    
+            for ef, pending in list(self.pending_transitions.items()):
+                self._push_to_buffer({
+                    'state':      pending['state'],
+                    'action':     pending['action'],
+                    'reward':     0.0,
+                    'next_state': self._get_state_vector(file_id),
+                    'done':       True,
+                })
+            self.pending_transitions.clear()
+
+    def _push_to_buffer(self, exp: Dict):
+        if self.use_nn and self.replay_buffer is not None:
+            if self.use_prioritized:
+                self.replay_buffer.add(exp)
+            else:
+                self.replay_buffer.append(exp)
+        elif not self.use_nn:
+            self._update_q_table(exp)
+
     def _execute_action(self, action: int, file_id: int):
-        """
-        Execute cache replacement action.
-        
-        Args:
-            action: Slot index to replace
-            file_id: New file to cache
-        """
+        """Place file_id into cache slot `action`, evicting whatever was there."""
         if action < 0 or action >= self.capacity:
             return
-        
-        # Remove old file from slot
-        old_file = self.cache_slots[action]
-        if old_file != -1 and old_file in self.file_to_slot:
-            del self.file_to_slot[old_file]
-        
-        # Add new file
-        self.cache_slots[action] = file_id
+        old = self.cache_slots[action]
+        if old != -1 and old in self.file_to_slot:
+            del self.file_to_slot[old]
+        self.cache_slots[action]   = file_id
         self.file_to_slot[file_id] = action
-        
-        # Initialize counters for this slot
-        self.lru_counters[action] = 0
-        self.lfu_counters[action] = 1
-    
+        self.lru_counters[action]  = 0
+        self.lfu_counters[action]  = 1
+
     def _update_counters(self, file_id: int, cache_hit: bool):
         """
-        Update LRU/LFU counters.
-        
-        LRU: Increment only occupied slots, reset accessed file on hit
-        LFU: Increment accessed file counter on hit
+        Age all LRU counters by 1; refresh the hit slot's LRU to 0
+        and increment its LFU.
+
+        DQN-A FIX: called BEFORE _learn_from_request() in request()
+        so state vectors inside the learning step see fresh counters.
         """
-        # ========================================================================
-        # BUG FIX #5 (Alternative): Only increment LRU for occupied slots
-        # ========================================================================
-        # Increment LRU only for occupied slots (prevents empty slots from growing)
         for i in range(self.capacity):
             if self.cache_slots[i] != -1:
                 self.lru_counters[i] += 1
-        
-        # On cache hit, update the accessed file's counters
         if cache_hit and file_id in self.file_to_slot:
-            slot = self.file_to_slot[file_id]
-            self.lru_counters[slot] = 0  # Reset LRU
-            self.lfu_counters[slot] += 1  # Increment LFU
-    
-    # ========================================================================
-    # TRAINING (Double DQN with Prioritized Replay)
-    # ========================================================================
-    
+            s = self.file_to_slot[file_id]
+            self.lru_counters[s] = 0
+            self.lfu_counters[s] += 1
+
+    # -------------------------------------------------------------------------
+    # TRAINING (Double DQN + Soft Target Update + PER)
+    # -------------------------------------------------------------------------
     def _train_step(self):
-        """
-        Single DQN training step with soft target update.
-        
-        Uses Double DQN to reduce overestimation:
-        - Policy network selects best action
-        - Target network evaluates that action
-        """
         if not self.use_nn or len(self.replay_buffer) < self.batch_size:
             return
-        
-        # Sample batch (with smart sampling strategy)
         if self.use_prioritized:
-            experiences, weights, indices = self.replay_buffer.sample(self.batch_size)
-            if experiences is None:
+            exps, weights, indices = self.replay_buffer.sample(self.batch_size)
+            if exps is None:
                 return
             weights = torch.FloatTensor(weights).to(self.device)
         else:
-            experiences = random.sample(self.replay_buffer, self.batch_size)
+            exps    = random.sample(list(self.replay_buffer), self.batch_size)
             weights = torch.ones(self.batch_size).to(self.device)
             indices = None
-        
-        # Prepare tensors
-        # ✅ FIX #8: Optimized tensor creation (no warning)
-        states = torch.from_numpy(np.array([e['state'] for e in experiences], dtype=np.float32)).to(self.device)
-        actions = torch.from_numpy(np.array([e['action'] for e in experiences], dtype=np.int64)).to(self.device)
-        rewards = torch.from_numpy(np.array([e['reward'] for e in experiences], dtype=np.float32)).to(self.device)
-        next_states = torch.from_numpy(np.array([e['next_state'] for e in experiences], dtype=np.float32)).to(self.device)
-        dones = torch.from_numpy(np.array([e['done'] for e in experiences], dtype=np.float32)).to(self.device)
-        
-        # Current Q-values: Q(s,a)
+
+        def _t(key, dtype):
+            return torch.from_numpy(
+                np.array([e[key] for e in exps], dtype=dtype)).to(self.device)
+
+        states      = _t('state',      np.float32)
+        actions     = _t('action',     np.int64)
+        rewards     = _t('reward',     np.float32)
+        next_states = _t('next_state', np.float32)
+        dones       = _t('done',       np.float32)
+
         current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        
-        # Double DQN: select action with policy net, evaluate with target net
         with torch.no_grad():
-            # Best actions according to policy network
-            next_actions = self.q_network(next_states).argmax(1)
-            
-            # Q-values from target network
-            next_q = self.target_network(next_states).gather(1, next_actions.unsqueeze(1)).squeeze(1)
-            
-            # Target: r + γ * Q_target(s', argmax_a Q_policy(s',a))
-            target_q = rewards + (1 - dones) * self.gamma * next_q
-        
-        # Compute loss with importance sampling weights
+            next_a   = self.q_network(next_states).argmax(1)
+            next_q   = self.target_network(next_states).gather(
+                           1, next_a.unsqueeze(1)).squeeze(1)
+            target_q = rewards + (1.0 - dones) * self.gamma * next_q
         td_errors = target_q - current_q
-        loss = (weights * F.smooth_l1_loss(current_q, target_q, reduction='none')).mean()
-        
-        # Optimize
+        loss = (weights * F.smooth_l1_loss(
+            current_q, target_q, reduction='none')).mean()
+
         self.optimizer.zero_grad()
         loss.backward()
-        
-        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), self.gradient_clip)
-        
         self.optimizer.step()
-        
-        # ========================================================================
-        # BUG FIX #4: Soft target update EVERY training step
-        # ========================================================================
-        # Research: "Soft target updates should happen every training step"
-        # - Lillicrap et al., "Continuous Control with Deep RL", ICLR 2016
-        #
-        # Original implementation had:
-        # - Soft update every 1000 steps (mixed strategy)
-        # Fixed: Soft update every training step (proper DDPG-style)
         self._soft_update_target()
-        
-        # Update priorities
+
         if self.use_prioritized and indices is not None:
             self.replay_buffer.update_priorities(
-                indices, td_errors.detach().cpu().numpy()
-            )
-        
+                indices, td_errors.detach().cpu().numpy())
         self.losses.append(float(loss.item()))
-    
+
     def _soft_update_target(self):
-        """
-        Soft update of target network (DDPG-style, every training step).
-        
-        θ_target ← τ * θ_policy + (1 - τ) * θ_target
-        
-        With τ = 0.005, target smoothly tracks policy network.
-        """
-        for target_param, param in zip(self.target_network.parameters(), 
-                                      self.q_network.parameters()):
-            target_param.data.copy_(
-                self.tau * param.data + (1 - self.tau) * target_param.data
-            )
-    
-    def _update_q_table(self, experience: Dict):
-        """
-        Q-learning update for Q-table (fallback mode).
-        
-        Q(s,a) ← Q(s,a) + α * [r + γ * max_a' Q(s',a') - Q(s,a)]
-        """
-        state_key = self._discretize_state(experience['state'])
-        next_key = self._discretize_state(experience['next_state'])
-        
-        action = experience['action']
-        reward = experience['reward']
-        done = experience['done']
-        
-        # Current Q-value
-        current_q = self.q_table[state_key][action]
-        
-        # Best next Q-value
-        if done:
-            next_max_q = 0.0
-        else:
-            next_max_q = np.max(self.q_table[next_key])
-        
-        # Q-learning update
-        target_q = reward + self.gamma * next_max_q
-        self.q_table[state_key][action] += self.lr * (target_q - current_q)
-    
-    # ========================================================================
-    # CACHE INTERFACE METHODS
-    # ========================================================================
-    
+        """Polyak averaging: theta_target <- tau*theta + (1-tau)*theta_target"""
+        for tp, p in zip(self.target_network.parameters(),
+                         self.q_network.parameters()):
+            tp.data.copy_(self.tau * p.data + (1.0 - self.tau) * tp.data)
+
+    def _update_q_table(self, exp: Dict):
+        sk  = self._discretize_state(exp['state'])
+        nk  = self._discretize_state(exp['next_state'])
+        a, r, done = exp['action'], exp['reward'], exp['done']
+        cq  = self.q_table[sk][a]
+        nq  = 0.0 if done else float(np.max(self.q_table[nk]))
+        self.q_table[sk][a] += self.lr * (r + self.gamma * nq - cq)
+
+    # -------------------------------------------------------------------------
+    # CACHE INTERFACE
+    # -------------------------------------------------------------------------
     def populate(self, items: Optional[Iterable[int]] = None):
-        """
-        Initialize cache with most popular files.
-        
-        Args:
-            items: Optional list of file IDs to cache (in priority order)
-        """
-        if items is None:
-            # Use popularity
-            top_files = np.argsort(-self.popularity)[:self.capacity]
-        else:
-            top_files = list(items)[:self.capacity]
-        
-        self.cache_slots = [-1] * self.capacity
+        """Pre-load cache with top-popularity files."""
+        self.pending_transitions.clear()
+        top = (np.argsort(-self.popularity)[:self.capacity]
+               if items is None else list(items)[:self.capacity])
+        self.cache_slots  = [-1] * self.capacity
         self.file_to_slot.clear()
-        
-        for slot, file_id in enumerate(top_files):
-            self.cache_slots[slot] = int(file_id)
-            self.file_to_slot[int(file_id)] = slot
-            self.lfu_counters[slot] = 1
-            self.lru_counters[slot] = 0
-    
+        for slot, fid in enumerate(top):
+            self.cache_slots[slot]      = int(fid)
+            self.file_to_slot[int(fid)] = slot
+            self.lfu_counters[slot]     = 1
+            self.lru_counters[slot]     = 0
+
     def is_hit(self, item: int, update_stats: bool = True) -> bool:
-        """
-        Check if item is in cache.
-        
-        Args:
-            item: File ID
-            update_stats: Whether to update hit/miss statistics
-        
-        Returns:
-            True if cache hit, False otherwise
-        """
         hit = int(item) in self.file_to_slot
-        
         if update_stats:
-            if hit:
-                self._record_hit()
-            else:
-                self._record_miss()
-        
+            self._record_hit() if hit else self._record_miss()
         return hit
-    
+
     def get_contents(self) -> Set[int]:
-        """Get current cache contents."""
         return set(f for f in self.cache_slots if f != -1)
-    
+
     def clear(self):
-        """Clear cache and reset state."""
-        self.cache_slots = [-1] * self.capacity
+        """
+        Reset cache state.
+        DQN-I FIX: also resets cumulative_reward to 0.0 to prevent
+        reward accumulator carry-over between evaluation runs.
+        Note: episode_rewards and losses are intentionally preserved
+        as training history (useful for post-hoc analysis).
+        """
+        self.cache_slots       = [-1] * self.capacity
         self.file_to_slot.clear()
-        self.lru_counters = np.zeros(self.capacity, dtype=np.int32)
-        self.lfu_counters = np.zeros(self.capacity, dtype=np.int32)
-        self.last_state = None
-        self.last_action = None
+        self.lru_counters      = np.zeros(self.capacity, dtype=np.int32)
+        self.lfu_counters      = np.zeros(self.capacity, dtype=np.int32)
+        self.pending_transitions.clear()
+        self.cumulative_reward = 0.0   # DQN-I FIX
         self.reset_stats()
-    
+
     def set_eval_mode(self, eval_mode: bool = True):
-        """
-        Set evaluation mode (no exploration, no training).
-    
-        🔧 FIXED (Dec 12, 2025): Prevents epsilon corruption during train/test switches
-    
-        ROOT CAUSE: Old implementation saved/restored epsilon on every call,
-        causing epsilon decay to restart from corrupted values.
-    
-        SOLUTION: Only save epsilon once when entering eval mode, restore when exiting.
-    
-        Args:
-            eval_mode: True for evaluation, False for training
-        """
+        """Toggle eval mode; preserves/restores training epsilon."""
         self.eval_mode = eval_mode
-    
         if eval_mode:
-            # Save training epsilon ONLY if not already saved
             if not hasattr(self, '_training_epsilon'):
                 self._training_epsilon = self.epsilon
-            self.epsilon = 0.0  # No exploration during evaluation
-            if self.use_nn:
-                self.q_network.eval()
+            self.epsilon = 0.0
+            if self.use_nn: self.q_network.eval()
         else:
-            # Restore training epsilon and clean up
             if hasattr(self, '_training_epsilon'):
                 self.epsilon = self._training_epsilon
                 delattr(self, '_training_epsilon')
-            if self.use_nn:
-                self.q_network.train()
+            if self.use_nn: self.q_network.train()
 
-    
-    # ========================================================================
+    # -------------------------------------------------------------------------
     # MODEL PERSISTENCE
-    # ========================================================================
-    
+    # -------------------------------------------------------------------------
     def save_model(self, filepath: str):
-        """Save learned model to file."""
         if self.use_nn:
-            save_dict = {
-                'q_network': self.q_network.state_dict(),
-                'target_network': self.target_network.state_dict(),
-                'optimizer': self.optimizer.state_dict(),
-                'training_step': self.training_step,
-                'epsilon': self.epsilon,
-                'popularity': self.popularity,
-                'cache_slots': self.cache_slots,
-                'file_to_slot': self.file_to_slot,
-                'lru_counters': self.lru_counters,
-                'lfu_counters': self.lfu_counters
+            d = {
+                'q_network':           self.q_network.state_dict(),
+                'target_network':      self.target_network.state_dict(),
+                'optimizer':           self.optimizer.state_dict(),
+                'training_step':       self.training_step,
+                'epsilon':             self.epsilon,
+                'popularity':          self.popularity,
+                'cache_slots':         self.cache_slots,
+                'file_to_slot':        self.file_to_slot,
+                'lru_counters':        self.lru_counters,
+                'lfu_counters':        self.lfu_counters,
+                'pending_transitions': self.pending_transitions,
             }
-            
-            # Save beta state if using prioritized replay
             if self.use_prioritized:
-                save_dict['per_beta'] = self.replay_buffer.get_beta()
-                save_dict['per_frame_idx'] = self.replay_buffer.frame_idx
-            
-            torch.save(save_dict, filepath)
+                d['per_beta']      = self.replay_buffer.get_beta()
+                d['per_frame_idx'] = self.replay_buffer.frame_idx
+            torch.save(d, filepath)
         else:
             with open(filepath, 'wb') as f:
                 pickle.dump({
-                    'q_table': dict(self.q_table),
-                    'training_step': self.training_step,
-                    'epsilon': self.epsilon,
-                    'popularity': self.popularity,
-                    'cache_slots': self.cache_slots,
-                    'file_to_slot': self.file_to_slot
+                    'q_table':             dict(self.q_table),
+                    'training_step':       self.training_step,
+                    'epsilon':             self.epsilon,
+                    'popularity':          self.popularity,
+                    'cache_slots':         self.cache_slots,
+                    'file_to_slot':        self.file_to_slot,
+                    'pending_transitions': self.pending_transitions,
                 }, f)
-        
-        print(f"✅ Model saved to {filepath}")
-    
+        print(f'Model saved to {filepath}')
+
     def load_model(self, filepath: str):
-        """Load learned model from file."""
         if self.use_nn:
-            checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
-            self.q_network.load_state_dict(checkpoint['q_network'])
-            self.target_network.load_state_dict(checkpoint['target_network'])
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
-            self.training_step = checkpoint['training_step']
-            self.epsilon = checkpoint['epsilon']
-            self.popularity = checkpoint['popularity']
-            self.cache_slots = checkpoint['cache_slots']
-            self.file_to_slot = checkpoint['file_to_slot']
-            self.lru_counters = checkpoint.get('lru_counters', self.lru_counters)
-            self.lfu_counters = checkpoint.get('lfu_counters', self.lfu_counters)
-            
-            # Restore beta state if available
-            if self.use_prioritized and 'per_beta' in checkpoint:
-                self.replay_buffer.beta = checkpoint['per_beta']
-                self.replay_buffer.frame_idx = checkpoint.get('per_frame_idx', 0)
+            ckpt = torch.load(filepath, map_location=self.device,
+                              weights_only=False)
+            self.q_network.load_state_dict(ckpt['q_network'])
+            self.target_network.load_state_dict(ckpt['target_network'])
+            self.optimizer.load_state_dict(ckpt['optimizer'])
+            self.training_step       = ckpt['training_step']
+            self.epsilon             = ckpt['epsilon']
+            self.popularity          = ckpt['popularity']
+            self.cache_slots         = ckpt['cache_slots']
+            self.file_to_slot        = ckpt['file_to_slot']
+            self.lru_counters        = ckpt.get('lru_counters', self.lru_counters)
+            self.lfu_counters        = ckpt.get('lfu_counters', self.lfu_counters)
+            self.pending_transitions = ckpt.get('pending_transitions', {})
+            if self.use_prioritized and 'per_beta' in ckpt:
+                self.replay_buffer.beta      = ckpt['per_beta']
+                self.replay_buffer.frame_idx = ckpt.get('per_frame_idx', 0)
         else:
             with open(filepath, 'rb') as f:
-                checkpoint = pickle.load(f)
-            self.q_table = defaultdict(lambda: np.zeros(self.action_dim), checkpoint['q_table'])
-            self.training_step = checkpoint['training_step']
-            self.epsilon = checkpoint['epsilon']
-            self.popularity = checkpoint['popularity']
-            self.cache_slots = checkpoint['cache_slots']
-            self.file_to_slot = checkpoint['file_to_slot']
-        
-        print(f"✅ Model loaded from {filepath}")
-    
-    # ========================================================================
-    # STATISTICS
-    # ========================================================================
-    
-    def get_stats(self) -> Dict:
-        """
-        Get comprehensive statistics.
-    
-        ✅ FIX #7 (Dec 12, 2025): Proper beta retrieval from PER buffer
-        """
-        base_stats = super().stats()
-    
-        dqn_stats = {
-            'training_step': self.training_step,
-            'epsilon': self.epsilon,
-            'eval_mode': self.eval_mode,
-            'avg_episode_reward': np.mean(self.episode_rewards[-100:]) if self.episode_rewards else 0,
-            'avg_loss': np.mean(self.losses[-100:]) if self.losses else 0,
-            'replay_buffer_size': len(self.replay_buffer) if self.replay_buffer else 0,
-            'use_neural_network': self.use_nn,
-            'cic_count': self.cic_count,
-            'sic_count': self.sic_count,
-            'warm_up_steps': self.warm_up_steps
-        }
-    
-        # ✅ FIX #7: Always add beta value with correct key name
-        if self.use_prioritized and self.replay_buffer is not None:
-            try:
-                dqn_stats['beta'] = self.replay_buffer.get_beta()  # Changed from 'per_beta' to 'beta'
-            except (AttributeError, TypeError):
-                dqn_stats['beta'] = 0.0
-        else:
-            dqn_stats['beta'] = 0.0  # Not using PER
-    
-        return {**base_stats, **dqn_stats}
+                ckpt = pickle.load(f)
+            self.q_table             = defaultdict(
+                lambda: np.zeros(self.action_dim), ckpt['q_table'])
+            self.training_step       = ckpt['training_step']
+            self.epsilon             = ckpt['epsilon']
+            self.popularity          = ckpt['popularity']
+            self.cache_slots         = ckpt['cache_slots']
+            self.file_to_slot        = ckpt['file_to_slot']
+            self.pending_transitions = ckpt.get('pending_transitions', {})
+        print(f'Model loaded from {filepath}')
 
+    # -------------------------------------------------------------------------
+    # STATISTICS
+    # -------------------------------------------------------------------------
+    def get_stats(self) -> Dict:
+        base = super().stats()
+        dqn  = {
+            'training_step':       self.training_step,
+            'epsilon':             self.epsilon,
+            'eval_mode':           self.eval_mode,
+            'avg_episode_reward':  float(np.mean(self.episode_rewards[-100:])) if self.episode_rewards else 0.0,
+            'avg_loss':            float(np.mean(self.losses[-100:]))           if self.losses          else 0.0,
+            'replay_buffer_size':  len(self.replay_buffer) if self.replay_buffer else 0,
+            'use_neural_network':  self.use_nn,
+            'cic_count':           self.cic_count,
+            'sic_count':           self.sic_count,
+            'warm_up_steps':       self.warm_up_steps,
+            'pending_transitions': len(self.pending_transitions),
+            'beta':                self.replay_buffer.get_beta() if (
+                                       self.use_prioritized and self.replay_buffer
+                                   ) else 0.0,
+        }
+        return {**base, **dqn}
 
 
 # Alias for compatibility
