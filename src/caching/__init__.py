@@ -37,6 +37,20 @@ try:
 except ImportError:
     HAS_DQN = False
 
+# DDPG imports (conditional)
+try:
+    from .ddpg_cache import DDPGCache
+    HAS_DDPG = True
+except ImportError:
+    HAS_DDPG = False
+
+# MADDPG imports (conditional)
+try:
+    from .maddpg_cache import MADDPGCache
+    HAS_MADDPG = True
+except ImportError:
+    HAS_MADDPG = False
+
 # Define what's available when using "from caching import *"
 __all__ = [
     # Base class
@@ -58,9 +72,13 @@ __all__ = [
     'create_cache',
 ]
 
-# Add DQN if available
+# Add DRL agents if available
 if HAS_DQN:
     __all__.append('DQNCache')
+if HAS_DDPG:
+    __all__.append('DDPGCache')
+if HAS_MADDPG:
+    __all__.append('MADDPGCache')
 
 
 def create_cache(policy: str, capacity: int, **kwargs):
@@ -107,8 +125,27 @@ def create_cache(policy: str, capacity: int, **kwargs):
             )
         return DQNCache(capacity, **kwargs)
     
+    elif policy == 'ddpg':
+        if not HAS_DDPG:
+            raise ImportError(
+                "DDPG cache not available. "
+                "Ensure ddpg_cache.py exists and PyTorch is installed."
+            )
+        return DDPGCache(capacity, **kwargs)
+    
+    elif policy == 'maddpg':
+        if not HAS_MADDPG:
+            raise ImportError(
+                "MADDPG cache not available. "
+                "Ensure maddpg_cache.py exists and PyTorch is installed."
+            )
+        return MADDPGCache(capacity, **kwargs)
+    
     else:
-        available_policies = "topk, lru, lfu, random" + (", dqn" if HAS_DQN else "")
+        available_policies = "topk, lru, lfu, random"
+        if HAS_DQN: available_policies += ", dqn"
+        if HAS_DDPG: available_policies += ", ddpg"
+        if HAS_MADDPG: available_policies += ", maddpg"
         raise ValueError(
             f"Unknown cache policy: '{policy}'. \n"
             f"Available policies: {available_policies}"

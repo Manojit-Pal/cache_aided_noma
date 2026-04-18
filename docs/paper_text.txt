@@ -1,0 +1,1344 @@
+
+===== PAGE 1 =====
+1
+Multi-Agent
+DRL for Resource Allocation and
+Cache Design in Terrestrial-Satellite Networks
+Xiaonan Li, Haijun Zhang, Huan Zhou, Ning Wang, Keping Long, Saba Al-Rubaye, and George K.
+Karagiannidis, Fellow, IEEE
+Abstract —In the past few years, satellite communications have
+greatly affected our daily lives, and the integrated terrestrial-
+satellite network can combine the advantages of satellite and base
+stations (BSs) to provide wider coverage and lower cost. Because
+the resources of terrestrial-satellite network are limited, how to
+allocate resources of terrestrial-satellite network through effective
+methods has become a major challenge. This paper proposes a
+framework for resource allocation of terrestrial-satellite network
+based on non-orthogonal multiple access (NOMA). Then, a
+deployment method of local cache pools is given to achieve
+lower time delay and maximize energy efﬁciency in terrestrial-
+satellite network. In the proposed framework, we adopt a multi-
+agent deep deterministic policy gradient (MADDPG) method to
+obtain the maximum energy efﬁciency by user association, power
+control, and cache design. The MADDPG algorithm is divided
+into two stages, users and BSs are set as agents to complete the
+optimization problem in the framework. Finally, the simulation
+results show that the proposed method has better optimized
+performance compared with the traditional single-agent deep
+reinforcement learning algorithm and can efﬁciently solve the
+problems of resource allocation and cache design in the integrated
+terrestrial-satellite network.
+Index Terms—MADDPG, energy efﬁciency, resource alloca-
+tion, terrestrial-satellite network, NOMA.
+I. I NTRODUCTION
+With rapid increase of mobile data, the scarcity of spectrum
+resources has brought a series of new problems and challenges
+in wireless communications [1]. To solve these problems and
+challenges, non-orthogonal multiple access (NOMA) technol-
+ogy based on power domain multiplexing is a signiﬁcant
+This work is supported in part by the National Key R&D Program of
+China (2021YFB2900801), Beijing Natural Science Foundation (L212004),
+and China University Industry-University-Research Collaborative Innovation
+Fund (2021FNA05001). This paper was presented at the IEEE Global Com-
+munications Conference, Madrid, Spain, December 2021. (Corresponding
+author: Huan Zhou).
+Xiaonan Li, Haijun Zhang, and Keping Long are with the Beijing Advanced
+Innovation Center for Materials Genome Engineering, Beijing Engineering
+and Technology Research Center for Convergence Networks and Ubiquitous
+Services, University of Science and Technology Beijing, Beijing, 100083,
+China (e-mail: haijunzhang@ieee.org).
+Huan Zhou is with the College of Computer and Information Tech-
+nology, China Three Gorges University, Yichang 443002, China. (e-mail:
+zhouhuan117@gmail.com).
+Ning Wang is with Henan Joint International Research Laboratory of
+Intelligent Networking and Data Analysis, School of Information Engineering,
+Zhengzhou University (email: ienwang@zzu.edu.cn).
+Saba Al-Rubaye is with the School of Aerospace, Transport and
+Manufacturing, Cranﬁeld University, Bedford MK43 0AL, U.K. (e-mail:
+s.alrubaye@cranﬁeld.ac.uk).
+George K. Karagiannidis is with the Aristotle University of Thessaloniki,
+541 24 Thessaloniki, Greece (e-mail: geokarag@auth.gr).candidate in next generation wireless communication networks
+[2]-[3], where NOMA can improve the total energy efﬁciency
+of the system [4]-[9].
+The integrated terrestrial-satellite network that consists of
+BSs on the ground and satellites in the space is an important
+scene in the 6G system. The NOMA technology is often
+applied in the integrated terrestrial-satellite network [10]-
+[14]. It is considered as a promising scenario and worthy of
+research.
+In the terrestrial-satellite network [16]-[19], BSs provide
+low-cost communication services, while satellites can be used
+to cover and serve users who are in underdeveloped areas. This
+system can achieve a wider coverage area and better service
+quality. However, the resources of the integrated terrestrial-
+satellite network are limited. One of the main challenges
+is how to use effective methods for resource allocation and
+improve the system’s energy efﬁciency. Deploying cache pools
+for the BSs in the system is a promising method to improve
+system energy efﬁciency, which can reduce the time delay and
+support the efﬁcient ﬁles retrieval.
+Many research on the resource allocation of integrated
+terrestrial-satellite network have been investigated. [17] pro-
+posed a method that uses precoding to optimize resource.
+The [20] investigated the placement of substance and delivery
+problem to optimize path length. The authors in [21] investi-
+gated the problem of cross-layer design of the link scheduling,
+frequency assignment, and ﬂow control in hybrid terrestrial-
+satellite wireless backhauling networks. In [22], the authors
+proposed a convex relaxation approach to achieve power and
+ﬂow assignment.
+[20] proposed a joint beam endowments design of cognitive
+satellite ground network based on NOMA. By successive
+convex approximation (SCA), the nonconvex maximization
+problem is transformed into a corresponding convex problem
+that is easy to solve, so as to maximize the security rate of
+satellite users under imperfect channel state information. [13]
+studied a joint optimization design of satellite ground fusion
+network based on NOMA, and proposes a new resource allo-
+cation scheme. On the basis of user clustering, a beamforming
+algorithm based on iterative penalty function is proposed. The
+simulation results conﬁrm the effectiveness of this method.
+Although many papers used traditional methods in the
+integrated terrestrial-satellite networks to allocate resource,
+traditional optimization methods will be difﬁcult to solve the
+problem in an unstable environment. On the one hand, the
+environment of integrated terrestrial-satellite is unstable and
+
+===== PAGE 2 =====
+2
+the
+user’s demand for cache ﬁles is uncertain. On the other
+hand, many constraints are introduced in the optimization of
+this scenario. Sometimes it is difﬁcult to ﬁnd an accurate
+mathematical model to solve these optimization problems.
+To solve the above problems, deep reinforcement learning
+(DRL) is introduced for resource allocation and cache design
+in system. DRL is an effective method in solving the opti-
+mization problems under uncertainty. In [23], the authors used
+deep Q-network (DQN) to achieve user access. [24] proposed
+a cooperative multi-agent deep reinforcement learning (CM-
+DRL) framework to achieve the radio resources management
+strategy. In [25], authors used a variety of deep reinforcement
+learning methods to achieve power control in cognitive radio
+scenarios. The authors discussed the integrated terrestrial-
+satellite network, and used deep reinforcement learning to
+achieve resource optimization issues such as throughput and
+bandwidth in [26]. In [27], DRL was used to achieve resource
+allocation in a multibeam satellite system. In [28], the authors
+used multi-objective DRL to process cognitive satellite scenar-
+ios. In [29], the authors used DRL to achieve task scheduling.
+DRL is also used in many cache design optimization
+problems. In [30], the authors used actor-critic frameworks
+in edge caching scenarios. The authors in [31] used two-
+layer Q network to achieve a scheme called double coded
+caching. In [32], the authors decomposed the joint base station
+and user cache optimization problem into two subproblems,
+then they applied value function approximation Q-learning and
+DQN to solve these two subproblems. In [33], the authors
+proposed a DRL-based algorithm, which can optimize the
+user association, power allocation of NOMA, deployment
+of unmanned aerial vehicle (UA V) and caching placement
+of UA Vs to jointly to minimize the content delivery delay.
+The [34] proposed a Q-learning based caching placement and
+resource allocation algorithm.
+The resource allocation and cache design problem in the
+above works for satellite scenarios are achieved by traditional
+DRL. The traditional DRL is the single-agent algorithm, so
+it cannot deal with an unstable environment when there are
+many agents in the scenarios. When the number of agents
+increases, the unstable and dynamic environment will reduce
+the optimization performance. At present, the research on
+resource allocation and cache design of integrated terrestrial-
+satellite network by using multi-agent reinforcement learning,
+is rarely investigated.
+A preliminary investigation on this research problem was
+published in [35], and this work extends [35] in the following
+ways: (1) the cache design is for integrated terrestrial-satellite
+is now considered; (2) the users and BSs, satellites are set as
+agents to complete the optimization problem in the optimiza-
+tion framework; (3) simulation results under multiple angles
+are provided to verify the proposed methods. In this paper,
+we consider an integrated terrestrial-satellite network based
+on NOMA and use a multi-agent deep deterministic policy
+gradient method (MADDPG) to achieve user association,
+power control, and cache design to improve the system energy
+efﬁciency [36].
+The main contributions of this paper are summarized asfollows.
+•We propose a cache-enabling general downlink frame-
+work for NOMA integrated terrestrial-satellite network,
+the users in the network are served by the BSs and satel-
+lites. The cache design is introduced into the integrated
+terrestrial-satellite to deploy cache equipment for BSs and
+satellites.
+•We formulate an optimization problem to maximize the
+energy efﬁciency by dynamically optimizing the user
+association, power control and caching placement of BSs
+and satellites
+•We decompose the original optimization problem of
+energy efﬁciency into two stages: resource allocation and
+cache design. In order to solve these two sub problems,
+a novel and efﬁcient multi-agent deep reinforcement
+learning algorithm is used in the paper. The users and
+BSs, satellites are set as agents to complete the op-
+timization problem in the optimization framework. In
+the framework, the user association and power control
+scheme based on MADDPG is ﬁrst proposed. The users
+are set as the agents to choose the BSs or satellites and
+the power control factor, which has achieved the objective
+of optimizing resource allocation. Then, the cache design
+plan based on MADDPG is proposed. BSs and satellites
+are set as the agents to select ﬁles cache from ﬁles library
+to local cache pool to improve energy efﬁciency.
+•We demonstrate the performance of the proposed MAD-
+DPG optimization framework to optimize the user associ-
+ation, power control and caching placement by comparing
+with the benchmark algorithms, the proposed algorithms
+in this paper achieve a good optimization performance.
+The structure of this paper is as follows. In Section II,
+the system model and problem formulation are presented. In
+Section III, the MADDPG algorithm is introduced to solve
+the formulated problems. The simulation results are given in
+Section IV . The work is concluded in Section V .
+II. S YSTEM MODEL AND PROBLEM FORMULATION
+A. System Model
+6DWHOOLWH
+%6
+8VHU
+&DFKH&RUH1HWZRUN
+*DWHZD\
+Fig. 1. The integrated terrestrial-satellite network.
+Fig.
+1 shows the integrated terrestrial-satellite network
+which consists of NBase Stations (BSs) and Llow-orbit
+
+===== PAGE 3 =====
+3
+satellites.
+In this network, NBSs and Lsatellites jointly
+provide services for the ground users. Let Brepresent the set
+of BS, where B={B1,...BN}. The satellite set is represented
+byS={S1,...,SL}. TheMusers set is represented by
+U={U1,...UM}. There are Kusers served by ground BS,
+the set of them is UBS={U1,...,UK}. The remaining O
+users are served by satellites, the set of satellite users is
+USA={U1,...,UO}.
+NOMA scheme is implemented for the users associated with
+BS. In the NOMA systems, successive interference cancelation
+(SIC) can be used to reduce interference from other users,
+the superposition coding is used at the transmitter and SIC
+[37] technology can be used to perform user detection, correct
+demodulation, and interference cancellation in a certain order,
+which is the core concept of the NOMA. The multiple users
+associating with the same BS are regarded as a NOMA cluster.
+In the NOMA cluster, according to the best decoding order,
+the users with a better channel information state can reduce the
+interference from users who have a poor channel information
+state.
+In each time slot, Musers can only associates with one BS
+or one satellite in this system. Let an
+m(t)represents association
+situation between the mth user and nth BS, when the mth user
+associate with the nth BS, the value of an
+m(t)is 1, otherwise
+set the value of an
+m(t)to 0. In addition, al
+m(t)represents
+association situation between the mth user and the lth satellite,
+where the way to assign the value of al
+m(t)is the same to
+an
+m(t). The users can only associate with one BS or one
+satellite in the time slot.
+In the system model, the NOMA is implemented for users
+served by BS. Then, the signal to interference plus noise ratio
+(SINR) of Mth user served by BS in a time slot tcan be
+represented as
+SINR Bm(t) =an
+m(t)|hn
+m(t)|2pm(t)
+σBI(t)+σBO(t)+σS(t)+N0,(1)
+wherehn
+m(t)is the channel information state between the mth
+user associating with the nth BS.pm(t) =αm(t)pbmax
+M1,and
+pm(t)is the transmit power for user m, where αm(t)is the
+power control factor of mth user, and one BS can serve M1
+users in network. σBI(t)is the interference from the users
+in the same BS. σBO(t)is the interference from the users in
+other BSs. In addition, σS(t)is the interference from satellite
+users.N0is the additive white gaussian noise (AWGN) power.
+To compute σBI(t)which is caused by the users in the same
+cluster, we ﬁrst sort the users according to the channel gain
+in a BS as follows |hn
+1(t)| ≥...≥ |hn
+m(t)|...≥/vextendsingle/vextendsinglehn
+M1(t)/vextendsingle/vextendsingle.
+According to the order of channel gain, σBI(t)is the
+interference from the users who have better channel con-
+dition. Therefore, the interference from the same cluster
+is presented as σBI(t) =m−1/summationtext
+i=1an
+i(t)|hn
+i(t)|2pi(t), the in-
+terference from users served by other BSs is σBO(t) =
+N/summationtext
+j=1,j̸=nM1/summationtext
+i=1aj
+i(t)|hn
+i(t)|2pi(t), the interference from satellite
+users isσS(t) =L/summationtext
+j=1M2/summationtext
+i=1aj
+i(t)|gn
+i(t)|2ps,i(t), where a satellitecan serve M2users in network. ps,i(t)is the transmission
+power of satellite user.
+The SINR of Mth user served by satellite is
+SINR Sm(t) =al
+m(t)/vextendsingle/vextendsinglegl
+m(t)/vextendsingle/vextendsingle2ps,m(t)
+σB(t) +σSO(t)+N0, (2)
+wheregl
+m(t)is the channel information state between the
+mth user associating with the lth satellite. And ps,m(t) =
+αm(t)psmax
+M2isthe power of satellite user. The interfer-
+ence from BS users and other satellite users are, respec-
+tively,σB(t) =N/summationtext
+j=1M1/summationtext
+i=1aj
+i(t)/vextendsingle/vextendsinglehl
+i(t)/vextendsingle/vextendsingle2ps,i(t)andσSO(t) =
+M2/summationtext
+i=1,i̸=Ial
+i(t)/vextendsingle/vextendsinglegl
+i(t)/vextendsingle/vextendsingle2ps,i(t)+L/summationtext
+j=1,j̸=lM2/summationtext
+i=1aj
+i(t)/vextendsingle/vextendsinglegl
+i(t)/vextendsingle/vextendsingle2ps,i(t).
+The energy efﬁciency of the mth user in the time slot tis
+EEm(t) =N/summationtext
+n=1an
+m(t)log2(1+SINR Bm(t))
+pm(t)
++L/summationtext
+l=1al
+m(t)l
+og2(1+SINR Sm(t))
+ps,m(t),∀n∈[1,N],∀l∈[1,L].
+(3)
+The cache design in the system model is described as
+follows. Each user individually requests ﬁles from a ﬁle library
+F={1,...,F}. Each BS and satellite is conﬁgured with
+a cache pool to store the ﬁles. Therefore, there are N+L
+cache pools in the system. The size of BS cache pool is set
+asNf< F. Each BS selects Nfﬁles from the ﬁle library F
+as the combination of cache ﬁles. Each BS can store Nf∗s
+bit ﬁles. The size of satellite cache pool is set as Ns< F .
+Each satellite selects Nsﬁles from the ﬁle library Fas the
+combination of cache ﬁles. Each satellite can store Ns∗sbit
+ﬁles.
+When the user’s request arrives, the system ﬁrst searches the
+cache ﬁles in local cache pool deployed in the BS. If the local
+cache pool has the ﬁles that the user needs, the transmission
+between the user and the local BS will occur. The ﬁle is sent
+back to the user from the local BS, and the power consumed
+ispm,r(t). If the BS can not meet the cache ﬁle required by
+local users, users will search the required ﬁles in the core
+network using the return link. The power consumed at this
+time ispc,r(t).
+For satellite users, when the user’s request arrives, if the ﬁle
+requested by the user has been cached by the satellite, the user
+can directly obtain the ﬁle from the satellite without accessing
+the backhaul link. If the satellite is not equipped with the ﬁle
+required by the user, the user’s request will be forwarded to the
+ground gateway and access the ground gateway through the
+backhaul link, and download content from the core network.
+There are two ways to consider the caching gain in the
+system, where one is the reduction of the time delay, and
+the other is the alleviation of power consumption. The both
+rewards depend on whether the ﬁles request of user is satisﬁed
+by the local cache device.
+The variable Im(t)can be used to present whether the ﬁle
+request of the mth BS user is satisﬁed by the local cache
+
+===== PAGE 4 =====
+4
+de
+vice:
+Im(t) =/braceleftbigg1,the requests are satisﬁed,
+0,the requests are not satisﬁed .(4)
+It is assumed that the popularity distribution of ﬁles fol-
+lows ZipF distribution [38]. The popularity will inﬂuence the
+caching effect. Frequently, the popularity in our system can be
+follows a generalized ZipF distribution, and yield estimates for
+εbetween 0.56 and 0.83 [39].
+qm=1/fε
+/summationtextF
+f=11/fε,∀f . (5)
+Considering the reduction of the time delay, the reward of
+caching deployment is given by
+gm(t) =Im(t)countms
+Tm, (6)
+whereTmis
+the time delay of downloading the content
+requested by mth user through the backhaul link, sis the
+size of ﬁle, countmis the number of the content requested by
+mth user, This part of ﬁle can be directly obtained from the
+local cache.
+Similarly, considering the reduction of time delay and the
+transmission of ﬁles that hit the cache part, the beneﬁt of
+satellite cache deployment is
+gs,m(t) =Im(t)countms
+Ts,m, (7)
+whereTs,m is the time delay of downloading the content
+requested by mth user through the backhaul link.
+The cache hit rate is deﬁned as the proportion of users
+whose requests are satisﬁed in the system to measure the
+performance of the cache policy. The cache hit rate in the
+time slot tis
+Hit(t) =M/summationtext
+m=1Im(t)
+M. (8)
+F
+or convenience, we use P(t)to replace the total power
+consumption of BS users
+P(t) =pm(t)+(1−Im(t))pc,r(t)+Im(t)pm,r(t),(9)
+wherepm(t)is the transmit power for user m,pm,r(t)is
+the data retrieval power consumption of the content requested
+bymth user from local BS cache device, pc,r(t)is the data
+retrieval power consumption of the content requested by mth
+user from core network through backhaul link.
+For satellite users, we use Ps(t)to replace the total power
+consumption of satellite users
+Ps(t) =ps,m(t)+(1−Im(t))ps,c,r(t)+Im(t)ps,m,r(t),(10)
+whereps,m(t)is the transmit power for user m,ps,m,r(t)is
+the data retrieval power consumption of the content requested
+bymth user from satellite cache device, ps,c,r(t)is the data
+retrieval power consumption of the content requested by mth
+user from core network through Gateway Station.After combining base station cache with the above satellite
+model, the energy efﬁciency of the mth user in the time slot
+tis
+EEm(t) =N/summationtext
+n=1an
+m(t)log2(1+SINR Bm(t))+g m(t)
+P(t)
++L/summationtext
+l=1al
+m(t)l
+og2(1+SINR Sm(t))
+ps,m(t)
+=N/summationtext
+n=1an
+m(t)log2(1+SINR Bm(t))+gm(t)
+pm(t) +(1− Im(t))pc,r(t)+Im(t)pm,r(t)
++L/summationtext
+l=1al
+m(t)log2(1+SINR Sm(t))
+ps,m(t).(11)
+B. Problem Formulation
+The system model is introduced in last section, the opti-
+mization problem is formulated in this section. The objective
+of optimization problem is to maximize the total energy
+efﬁciency of all agents in the system through user association,
+power control and cache design.
+The constraints of optimization problem are introduced as
+follow. Firstly, the users can only associate with one BS or
+one satellite in a time slot.
+For each user associated to one BS or one satellite, it has
+its own maximum power constraint
+pm(t)≤pmax
+M1, (12)
+ps
+,m(t)≤ps,max
+M2, (13)
+where
+(12) and (13) describe the transmission power limits of
+BS users and satellite users respectively.
+For each BS or satellite, it has the quantity of service
+constraints
+M1/summationdisplay
+m=1aN
+m(t)≤M1,∀m∈[1,M1], (14)
+M2/summationdisplay
+m=1aL
+m(t)≤M2,∀m∈[1,M2]. (15)
+The constraint of the power control factor of the users is
+αm(t)∈[0,1],∀m∈[1,M], (16)
+where (16) represents the range of user power control, the
+power is selected and distributed in the range.
+The caching strategy used by the BS and satellite is limited
+by the size of the local cache capacity. The size of content
+requested by users is smaller than that of the local capacity.
+The size of local capacity is smaller than that of all ﬁle
+libraries.
+countm≤Nf≤F, (17)
+countm≤Ns≤F. (18)
+The optimization problem can be formulated as
+maxM/summationdisplay
+m=1EEm(t). (19)
+
+===== PAGE 5 =====
+5
+C1
+:N/summationtext
+n=1an
+m(t)+L/summationtext
+l=1al
+m(t)≤1,∀n∈[1,N],∀l∈[1,L],
+C2 :M1/summationtext
+m=1aN
+m(t)≤M1,∀m∈[1,M1],
+C3 :M2/summationtext
+m=1aL
+m(t)≤M2,∀m∈[1,M2],
+C4 :pm(t)≤pmax
+M1,∀m∈[1,M],
+C5 :ps,m(t)≤psmax
+M2,∀m∈[1,M],∀s∈[1,S],
+C6 :αm(t)∈(0,1],∀m∈[1,M],
+C7 :countm≤Nf≤F,
+C8 :countm≤Ns≤F.
+(20)
+The energy efﬁciency optimization problem in this paper has
+eight constraints. C1represents that the users in this system
+can only associate with one BS or one satellite in a time slot t.
+C2andC3the quantity of service constraints of each BS and
+satellite. C4andC5represent power limit of the mth user.
+C6is the constraint of the power control factor. C7andC8
+is the constraint of the size of local cache capacity.
+III. M ULTI -AGENT DRL FOR RESOURCE ALLOCATION
+AND CACHE DESIGN IN TERRESTRIAL -SATELLITE
+NETWORK
+In this section, we will introduce a MADDPG method to
+solve the optimization problem. The MADDPG framework
+will be introduced to maximize objective function and in the
+integrated terrestrial-satellite NOMA communication network.
+The optimization process contains two parts: user association
+and power control, and then cache design. Two algorithms
+based on MADDPG are proposed to solve these two problems.
+Different agents are selected skillfully in the two algorithms.
+A. Reinforcement Learning
+Reinforcement learning (RL) does not require a data set
+which receives reward information from the environment in
+each eposide, learns and then updates the parameters of the
+model. The agents in RL can interact with the environment and
+observe the reward of actions, and then learn how to change
+their actions to obtain higher reward. The agent is constantly
+making progress in a trial and error manner.
+B. MADDPG Framework Formulation
+In this integrated terrestrial-satellite NOMA communication
+network scenario, there are many agents in the environment.
+When the number of agents is increasing, traditional single-
+agent reinforcement learning will face an unstable and dy-
+namic environment, it will lead the agent to overﬁt a strong
+policy against its competitor. The proposed MADDPG algo-
+rithm can deal with the complex multi-agent scenario which
+can better adapt to the complex multi-agent scenario and
+achieve better optimization performance.
+The energy efﬁciency optimization problem of the integrated
+terrestrial-satellite network can be modeled as a Markovdecision process (MDP). The MDP is composed of a state
+spaceS, an action space A, a reward space and a transition
+probability space. As an agent, each user can observe the
+environment and get the observation, then select the actions
+from the action space and execute them. Next, it will get a
+reward after executing the actions. In this paper, the agent,
+action, state and reward of two algorithms are deﬁned as
+follows:
+1) MADDPG for User Association and Power Control: The
+MADDPG for this research problem is presented as algorithm
+1, which is the user association and power control scheme in
+[35]. In algorithm 1, the agent, action, state and reward are
+deﬁned as follows:
+Agent: Each user in the terrestrial-satellite network is
+considered as an agent.
+Action : In the system, each agent has two actions to
+execute. The action space is composed of two actions,
+A1={A11,A12}is the user association action and the associate
+situation between the agents and BSs or satellites. A11is
+deﬁned as: A11={an
+1(t),...,an
+M(t)}.A12is the power control
+factor,A12={α1(t),...,αM(t)}. Firstly, each agent decides
+which BSs or satellites to associate with. The user association
+A11is a discrete action, hance we need to discretize the action
+spaceA11. Secondly, it determines its own power control
+factor.
+Reward: In the system, each user executes actions to
+maximize its energy efﬁciency. The reward of mth user in
+the current time slot tis
+reward 1(t) =EEm(t). (21)
+State: The agent observes the change of its own energy ef-
+ﬁciency as the state space. If the energy efﬁciency of mth user
+in time slot is higher than previous time slot, the SEE
+1m(t)is set
+as 1. The state space of system is S1={SEE
+11(t),...,SEE
+1M(t)}.
+SEE
+1i(t) =/braceleftbigg1,ifreward 1(t)≥reward 1(t−1)
+0,otherwise .(22)
+wherei∈[1,M]is themth user.
+2) MADDPG For Cache Design: The algorithm 1 is used
+to optimize the resource allocation in the network. Then
+algorithm 2 is used to optimize the cache design of the BSs
+and satellites. Therefore, the agents, actions, states and rewards
+of the two algorithms are slightly different.
+Agent: The BSs or satellites selects which ﬁles from the
+ﬁles library, and the BS or satellite is considered as an agent
+in Algorithm 2.
+Action : In every time slot, each BS or satellite selects
+which ﬁles from the ﬁles library. A2={A21}. The ﬁles in the
+local cache pool is the combinations of the ﬁle libraries.
+Reward: In the system, each BS or satellite executes
+actions to maximize its energy efﬁciency. The number of
+agents is N+L. The total energy efﬁciency of users served
+bynth BS or satellite is set as reward. The reward of nth BS
+
+===== PAGE 6 =====
+6
+in
+the current time slot tis
+reward 2(t) =EEn(t) =
+
+K/summationtext
+m=1EEm(t), n∈[1,N],
+O/summationtext
+m=1EEm(t), n∈[N+1,N+L].
+(23)
+State: The agent in algorithm 2 is BS or satellite. There-
+fore if the reward of nth BS or satellite in this current time
+slot is higher than the previous time slot, the SEE
+2n(t)is set
+to 1. The state space of system is S2={SEE
+21(t),...,SEE
+2N(t)}.
+TheSEE
+2i(t)is set as
+SEE
+2i(t) =/braceleftbigg
+1,ifreward 2(t)≥reward 2(t−1),
+0,otherwise.(24)
+MADDPG algorithm can obtain the actions executed by
+other agents to reduce instability. The transition probability
+is presented as follow
+P(s′|s,a1,...aN,χ1,...,χM) =P(s′|s,a1,...aN)
+=P(s′|s,a1,...aN,χ′
+1,...,χ′
+M).(25)
+As shown by the state transition probability in (25) , when
+the policy of agents is dynamically changed and updated, the
+environment is still stable. In the formula (25), ai,∀i∈[1,M]
+is the action of the agent, sis the state. There are Magents
+in the network, and the policy values of all Magents in the
+system are set as χ={χ1,...,χM}. The policy of each agent
+has its corresponding parameter value ϖ={ϖ1,...,ϖM}.
+MADDPG is presented to solve the integrated terrestrial-
+satellite NOMA communication network optimization prob-
+lem. In the MADDPG algorithm, each agent aims to obtain
+the maximum return by optimizing its policy. The gradient of
+the objective function can be solved by the following equation.
+∇ϖiJ(χi) =Ex,a∼D[∇ϖiχi(ai|oi)∇aiQχ
+i(x,a1,...,aN)],
+(26)
+wherex,a are respectively the observation space and action
+space of Magents,Dis the replay memory.
+Theactor network and critic network play different roles
+in the MADDPG algorithm. The actor network will select
+actions according to policy. The actions A1orA2are selected
+according to the strategy value, which the action space is
+continuous. The critic network evaluates the actions that will
+be executed. The way to evaluate the actions is to update
+theQfunction. As is shown in the (26), the Qfunction
+to evaluate the actions is Qχ
+i(x,a1,...,aN). Theactor and
+critic network update in different methods in the MADDPG
+algorithm. The actor network updates the policy network for
+selecting actions through gradient descent in formula (26)
+[40]. The critic network update the Qfunction that evaluates
+the actions selected by actor network to minimize the loss
+functionL(ϖi)below
+y=ri+rQu′
+i(x′,a′
+1,...,a′
+N)|a′
+j=u′
+j(oj). (27)C. Algorithm Description
+We describe The algorithm 1 and algorithm 2 in this section.
+In this section, the MADDPG algorithm for system resource
+allocation is presented as algorithm 1 [35]. The MADDPG
+algorithm for system cache design problem is presented as
+algorithm 2.
+Algorithm 1 MADDPG algorithm for terrestrial-satellite net-
+work resource allocation problem
+1:Input: The parameters of deep neural networks and the
+replay memory.
+2:forepisode= 1 toEpdo
+3: Initialize the observation of the terrestrial-satellite net-
+work, including user association and power control.
+4: foragent= 1 toNdo
+5: forstep= 1 toStdo
+6: Each BS or satellite gets the observation state
+S1={SEE
+11(t),...,SEE
+1N(t)}.
+7: Each BS or satellite selects the user association
+and power control from A1={A11,A12}.
+8: Each BS or satellite observes reward via (21).
+9: end for
+10: end for
+11: Sample a random batch from replay memory.
+12: Each agent update actor network and critic network.
+13: Update the parameters of the target network.
+14:end for
+15:Output: The parameters of the trained deep neural net-
+works and user association and power control.
+Algorithm 2 MADDPG algorithm for terrestrial-satellite net-
+work cache design problem
+1:Input: The parameters of deep neural networks and the
+optimized user association and power control.
+2:forepisode= 1 toEpdo
+3: Use the optimization result of algorithm 1 to initialize
+the integrated terrestrial-satellite network scenario.
+4: foragent= 1 toNdo
+5: forstep= 1 toStdo
+6: Each BS or satellite gets the observation state
+S2={SEE
+21(t),...,SEE
+2N(t)}.
+7: Each BS or satellite selects the cache ﬁles from the
+ﬁle library A2={A21}based on the optimization
+result of algorithm 1.
+8: Each BS or satellite observes reward referring to
+(23) and next state.
+9: end for
+10: Each agent update actor network and critic network.
+Update the parameters of the target network.
+11: end for
+12:end for
+13:Output: The optimization of cache design and renewed
+energy efﬁciency.
+Firstly, the algorithm initializes the parameters of neural
+
+===== PAGE 7 =====
+7
+netw
+orks. At the same time, initializes the replay memory. The
+actor network selects behavior based on the probability, the
+critic network evaluates the behavior selected by the actor
+network. And the actor changes the probability based on
+the evaluation of the critic network. Secondly, the algorithm
+gives the initial state of the agents in the iterative process of
+the MADDPG algorithm for the terrestrial-satellite network.
+Next, for each step in an episode, each agent observes its new
+state which deeps the energy efﬁciency compare with it in last
+moment. Then agent selects action based on exploration and
+policy. After each agent has executed the action, it obtains the
+reward of this action and gets the new state. Finally, store the
+above values in the replay memory.
+IV. S IMULATION RESULTS
+A. Simulation Environment
+In this section, we set the experimental environment such as
+experimental parameters and the hyperparameters of algorithm
+1 and algorithm 2. Some simulation results are given to present
+the convergence performance of the MADDPG framework and
+the result compared with the traditional deep reinforcement
+learning algorithm.
+The network consists of 32 agents, 6 BSs, and 2 satellites.
+We setM1=M2= 4. The channel of BS is assumed to be
+Rayleigh channel. The parameters of satellites in this paper
+are deﬁned according to [41]. The carrier frequency is set at
+the S band. The maximum transmit power of BSs is set to 31
+dBm, and the maximum transmit power of satellites is set to
+43dBm.
+The cache related simulation environment are as follows, the
+size of the ﬁle library Fis 40, the size of BS cache device
+Nfis 3, and the size of satellite cache capacity Nsis also set
+to 3. The number of ﬁles required by the users countmis set
+to 1, and the ﬁle content size sis set to 2 bits.
+About the power of the transmission ﬁles. The data retrieval
+powers consumption of the content requested by users from
+local BS cache device pm,r(t)is set to 13 dBm. The data
+retrieval powers consumption of the content requested by users
+from core network through backhaul link pc,r(t)are set to
+26dBm. The power consumed by the user to request ﬁles
+from the satellite cache ps,m,r(t)is set to 17 dBm. The
+power consumed by the satellite to access the ground gateway
+through backhaul link and download content from the core
+networkps,c,r(t)is set to 30 dBm. Moreover, the cache design
+of Algorithm 2 optimizes the result of Algorithm 1.
+Here are the hyperparameters of the model in this simula-
+tion. The optimizer is AdamOptimizer and activation function
+isReLU . The learning rate of neural networks is alr=clr=
+0.001. The discount factor is 0.95. The batch size is set as 10.
+The total episode of the experiment is set to 1000. In each
+episode, the agent needs to complete 100 steps.
+B. Simulation Results
+When the number of agents is set to 24, 32 and 40
+respectively, optimization effect of algorithm 1 is presented0 200 400 600 800 1000
+Eposide20040060080010001200Energy Efficiency (bits/Joule/Hz)Algorithm1 M=40
+Algorithm1 M=32
+Algorithm1 M=24
+Fig. 2. Convergence of MADDPG in different numbers of agents.
+in
+Fig. 2. When the number of agents is 24, the parameters
+in the network are set as M= 24,N= 6,S= 2,
+M1=M2= 3. To test the convergence of algorithm 1 with
+the different number of agents in a more complex environment,
+we increase the M1andM2from 3 to 5. It can be seen that
+the three curves in Fig. 2 roughly reach the maximum reward
+of around 700 episodes, so the good convergence performance
+can be obtained in all the three cases. As can be see from the
+Fig. 2, when there are many agents, the terrestrial-satellite
+network becomes more complex, the algorithm 1 can still
+converge well. The observation demonstrates that algorithm
+1 can optimize objective function in the system.
+0 200 400 600 800 1000
+E
+poside5006007008009001000Energy Efficiency (bits/Joule/Hz)lr=10^(-3)
+lr=10^(-4)
+lr=10^(-5)
+Fig. 3. Convergence of MADDPG in different learning rate.
+Fig.
+3 presents the results of algorithm 1 when using
+different learning rate. We set M= 32,N= 6,S= 2,M 1=
+M2= 4 in the network. As the algorithm adopting different
+learning rates, the speed of convergence is slightly different.
+When the learning rate is relatively large, the convergence
+point arrives faster. Besides, the curves of three different
+learning rates converge to a similar height and get a similar
+reward.
+The two subgraphs of Fig. 4 respectively show the conver-
+gence of BSs and the satellites. We use the same experimental
+settings as the two ﬁgures above. The two parts converge at
+roughly the same speed and they both converge very quickly.
+
+===== PAGE 8 =====
+8
+0 200 400 600 800 1000400500600700800
+BS
+0 200 400 600 800 1000
+E
+poside75100125150175200Energy Efficiency (bits/Joule/Hz)
+SA
+Fig. 4. Energy efﬁciency convergence of BS users and satellite users.
+Fig.
+4 presents the energy efﬁciency of users served by BSs
+is higher than that of the satellite users. The total energy
+efﬁciency of BSs users converges to about 750 bits/Joule/Hz,
+and the total energy efﬁciency of satellites users converges to
+about 175 bits/Joule/Hz. The reason is that the users served
+by BSs have better channel conditions than the satellite users.
+0 200 400 600 800 1000
+E
+poside3004005006007008009001000Energy Efficiency (bits/Joule/Hz)MADDPG M=32
+DDPG M=32
+PPO Algorithm M=32
+Random Policy M=32
+Fig. 5. Comparison of algorithm 1 and benchmark algorithms.
+In
+order to verify the optimization performance of algorithm
+1 proposed in this paper, the integrated satellite network re-
+source optimization algorithm1 based on MADDPG proposed
+in this paper and three benchmark algorithms are listed as
+follows:
+(1) Deep Deterministic Policy Gradient (DDPG) algorithm:
+DDPG algorithm is introduced to compare with algorithm 1 in
+Fig. 5, as a traditional deep reinforcement learning algorithm,
+DDPG algorithm is the baseline algorithm among Policy
+Gradient (PG) algorithms. (2) Proximal Policy Optimization
+(PPO) algorithm: PPO algorithm is a new policy gradient
+algorithm. (3) Genetic algorithm (GA): GA is a algorithm to
+search the optimal solution by simulating the natural evolu-
+tion process. (4) Random Policy: In each episode, the user
+selects a random action value to determine the actions of user
+collaboration and power control.In Fig. 5, the curve shows the comparison of convergence
+processes of different algorithms when the number of users
+isM= 32. As can be seen in the Fig. 5, the rewards of the
+proposed algorithm 1, DDPG algorithm and PPO algorithm
+can reach convergence. For the same number of users, the
+energy efﬁciency of algorithm1 is the highest among the
+three algorithms, which can get the best resource optimization
+performance and better optimize the objective function of the
+system. The energy efﬁciency optimized by DDPG algorithm
+converges to 625 bits/Joule/Hz. PPO algorithm starts from
+450bits/Joule/Hz and converges to 580 bits/Joule/Hz after
+about 400 episodes. The curve of random policy oscillates
+between 400 and 500 bits/Joule/Hz, which can not converge
+well like other algorithms. Compared with the proposed algo-
+rithm 1, the effect of the optimization objective function of
+other algorithms is poor and the stability is not strong.
+0 24 32 40
+Nu
+mbers of Users02004006008001000Energy Efficiency (bits/Joule/Hz)MADDPG Algorithm
+DDPG Algorithm
+PPO Algorithm
+Genetic Algorithm
+Random Policy
+Fig. 6. The energy efﬁciency of different algorithms varies with the number
+of
+users in the system.
+In Fig. 6, the total energy efﬁciency of different algorithms
+varies with the number of users per BS and satellite. As can
+be seen in the Fig. 6, the total energy efﬁciency of the system
+will increase with the increase of the number of users of
+each BS and satellite. When the number of users of each BS
+and satellite increases from 3 to 5, the proposed algorithm
+1 can achieve higher energy efﬁciency than other benchmark
+algorithms. When the number of users of each BS and satellite
+is 5, the total energy efﬁciency of the system can reach 1180
+bits/Joule/Hz. It can be seen that the total energy efﬁciency of
+DDPG algorithm, PPO algorithm, GA algorithm and random
+policy is much lower than that of the algorithm1 proposed in
+this paper, which fully shows the performance of the proposed
+algorithm 1.
+Fig. 7 presents the convergence of algorithm 2 in different
+local capacity and ﬁle library. Although the number of training
+episode is set as 1000, the convergence speed of algorithm 2 is
+fast. It reach convergence in about 60 episodes. In Fig. 7, four
+cases ofNf= 3,F= 40,N f= 4,F= 40,N f= 3,F= 50
+andNf= 4,F= 50 are compared.
+We compare the convergence of algorithm 2 when the size
+of BS and satellite local capacity and size of ﬁles library
+are different. In the case of four different size of capacities,
+
+===== PAGE 9 =====
+9
+0 200 400 600 800 1000
+E
+poside8001000120014001600Energy Efficiency (bits/Joule/Hz)MADDPG Algorithm Nf=4 F=40
+MADDPG Algorithm Nf=4 F=50
+MADDPG Algorithm Nf=3 F=40
+MADDPG Algorithm Nf=3 F=50
+Fig. 7. The convergence of cache reward algorithm 2 in different local
+capacity
+and ﬁle library.
+algorithm 2 can get good convergence performance. In the
+early episode of train, the cache reward is less than 1090
+bits/Joule/Hz. This is because poor local cache deployment
+will cause additional power consumption. With the number of
+episodes increase, the cache rewards gradually increase. After
+training about 50 episodes, the cache rewards converge. In the
+framework, when the local cache capacity Nfis the same, the
+larger the ﬁle library F, the smaller the cache reward. Because
+when the cache ﬁle library Fincreases, it will be more difﬁcult
+to hit the ﬁle in the algorithm 2 framework. On the contrary,
+for the same cache ﬁle library F, the local cache capacity Nf
+becomes larger and the cache reward becomes larger.
+0 200 400 600 800 1000
+E
+poside600800100012001400Energy Efficiency (bits/Joule/Hz)MADDPG Algorithm
+DDPG Algorithm
+No Cache
+Random Policy
+Fig. 8. Comparison of algorithm 2 and benchmark algorithms.
+In
+Fig. 8 and Fig. 9, the curve shows the comparison of the
+energy efﬁciency convergence process and cache hit rate con-
+vergence process of different cache optimization algorithms
+whenNf= 3,F= 40. As can be seen in the Fig. 8, the
+energy efﬁciency of the proposed algorithm 2 and DDPG
+algorithm can reach convergence. For the same cache capacity
+and ﬁle library size, the energy efﬁciency of algorithm 2 is the
+highest among the four algorithms, which can get the best
+cache optimization effect and better optimize the objective
+function of the system. DDPG algorithm starts training from0 200 400 600 800 1000
+E
+poside0.000.050.100.150.200.250.300.35Hit Rate
+MADDPG Algorithm
+DDPG Algorithm
+Random Cache
+No Cache
+Fig. 9. Comparison of MADDPG and DDPG.
+900
+bits/Joule/Hz and converges to 1100 bits/Joule/Hz after
+about 700 episodes. The curve of random policy oscillates
+between 600 bits/Joule/Hz and 650 bits/Joule/Hz, which can
+not converge well like other algorithms. Compared with the
+proposed algorithm 2, the effect of the optimization objective
+function of other algorithms is poor and the stability is not
+strong. As can be seen in Fig. 9, the cache hit rate of algorithm
+2 starts to rise from 0.13 and ﬁnally converges to 0.33. The
+cache hit rate of DDPG algorithm can not converge well. From
+the perspective of cache hit rate, the proposed algorithm 2 can
+get better results.
+1 2 3 4 5 6
+C
+ache Size of BS/SA40060080010001200140016001800Energy Efficiency (bits/Joule/Hz)MADDPG Algorithm F=40
+MADDPG Algorithm F=50
+DDPG Algorithm
+Genetic Algorithm
+No cache
+Random Policy
+Fig. 10. Cache reward with different number of local cache capacity.
+Fig.
+10 and Fig. 11 respectively show the curves of energy
+efﬁciency of different algorithms with the cache capacity of
+each BS and satellite and the curves of cache hit rate with
+the cache capacity of each BS and satellite. As shown in
+Fig. 8, when the cache capacity is 1, the energy efﬁciency
+of MADDPG algorithm is less than that of uncached strategy.
+This is because the local cache capacity is too small, it is
+difﬁcult for the algorithm to cache ﬁles suitable for users, so it
+is difﬁcult to get good results. As the cache capacity increases
+from 1 to 6, the energy efﬁciency of MADDPG algorithm
+increases gradually. The proposed MADDPG algorithm can
+
+===== PAGE 10 =====
+10
+0123456
+C
+ache Size of BS/SA0.00.10.20.30.4Hit Rate
+MADDPG Algorithm F=40
+MADDPG Algorithm F=50
+DDPG Algorithm
+Genetic Algorithm
+Random Policy
+No cache
+Fig. 11. Cache hit rate with different number of local cache capacity.
+achie
+ve higher energy efﬁciency than other algorithms, and
+the gap with other algorithms increases gradually. The trend
+of cache hit rate in Fig. 10 is roughly the same as that in Fig.
+9. It can be seen from the ﬁgure that the cache hit rate of
+the proposed MADDPG algorithm is higher than that of other
+algorithms. Fig. 9 and Fig. 10 further illustrate the relationship
+between cache reward, cache hit rate, cache capacity and ﬁle
+library. In a certain range, when the local cache capacity is the
+same, the larger the ﬁle library, the smaller the cache reward
+and cache hit rate. Because when the ﬁle library increases, it
+is more difﬁcult to hit the required ﬁles. On the contrary, for
+the same ﬁle library, the larger the local cache capacity, the
+greater the cache reward and cache hit rate.
+V. C ONCLUSION
+In this paper, we propose a resource allocation and cache
+design scheme based on multi-agent deep reinforcement learn-
+ing in an integrated terrestrial-satellite NOMA network. The
+objective is to maximize the energy efﬁciency of the system.
+We adopt a MADDPG algorithm to achieve user association,
+power control and cache design to improve the total energy
+efﬁciency of the system. The multi-agent deep reinforcement
+learning algorithm in this paper is divided into two stages,
+users and BSs are cleverly set as agents to complete the
+optimization problem in the framework. First, the users are
+set as the agents to choose the BSs or satellites and the
+power control factor. Then, the cache design scheme based
+on MADDPG is proposed. The BSs and satellites are set as
+the agents to select ﬁles cache from ﬁles library to local cache
+pool to improve energy efﬁciency. According to the simulation
+results, the proposed framework has good effectiveness and
+potential in solving the problem. Compared with the traditional
+single-agent deep reinforcement learning algorithm DDPG
+and other benchmark algorithms, it has a better optimization
+performance. In the future research, MADDPG algorithm will
+be used to deal with the optimal resource allocation problem
+of multi-layer satellite network model. More detailed power
+consumption will be investigated in future work.REFERENCES
+[1] H. Zhang, N. Liu, X. Chu, K. Long, A. Aghvami, and V . C. M.
+Leung, “Network slicing based 5G and future mobile networks: Mobility,
+resource management, and challenges,” IEEE Commun. Mag., vol. 55,
+no. 8, pp. 138–145, Aug. 2017.
+[2] L. Dai, B. Wang, Y . Yuan, S. Han, C. I and Z. Wang, “Non-orthogonal
+multiple access for 5G: Solutions, challenges, opportunities, and future
+research trends,” IEEE Commun. Mag., vol. 53, no. 9, pp. 74—81, Sep.
+2015.
+[3] Z. Ding, R. Schober, and H. V . Poor, “A general MIMO framework for
+NOMA downlink and uplink transmission based on signal alignment,”
+IEEE Trans. Wireless Commun., vol. 15, no. 6, pp. 4438–4454, June.
+2016.
+[4] H. Zhang et al., “Energy efﬁcient dynamic resource optimization in
+NOMA system,” IEEE Trans. Wireless Commun., vol. 17, no. 9, pp.
+5671–5683, Sep. 2018.
+[5] A. A. Nasir, H. D. Tuan, T. Q. Duong and M. Debbah, “NOMA through-
+put and energy efﬁciency in energy harvesting enabled networks,” IEEE
+Trans. Wireless Commun., vol. 67, no. 9, pp. 6499–6511, Sep. 2019.
+[6] H. Zhang, H. Zhang, W. Liu, K. Long, J. Dong and V . C. M. Leung,
+“Energy efﬁcient user clustering, hybrid precoding and power optimiza-
+tion in terahertz MIMO-NOMA systems,” IEEE J. Sel. Areas Commun.,
+vol. 38, no. 9, pp. 2074–2085, Sep. 2020.
+[7] H. Zhang, M. Feng, K. Long, G. K. Karagiannidis, V . C. M. Leung and
+H. V . Poor, “Energy efﬁcient resource management in SWIPT enabled
+heterogeneous networks with NOMA,” IEEE Trans. Wireless Commun.,
+vol. 19, no. 2, pp. 835–845, Feb. 2020.
+[8] Y . Xu, Z. Qin, G. Gui, H. Gacanin, H. Sari and F. Adachi, ”Energy
+efﬁciency maximization in NOMA enabled backscatter communications
+with QoS guarantee,” in IEEE Wireless. Commun. Lett., vol. 10, no. 2,
+pp. 353–357, Feb. 2021.
+[9] M. Zeng, W. Hao, O. A. Dobre and H. V . Poor, ”Energy-efﬁcient power
+allocation in uplink mmWave massive MIMO with NOMA,” in IEEE
+Trans. on Veh. Technol., vol. 68, no. 3, pp. 3000–3004, Mar. 2019.
+[10] W. Lu, K. An, T. Liang and X. Yan, “Robust beamforming in multibeam
+satellite systems with non-orthogonal multiple access,” IEEE Wireless
+Commun. Lett., to be published.
+[11] X. Zhu, C. Jiang, L. Kuang, N. Ge and J. Lu, “Non-orthogonal multiple
+access based integrated terrestrial-satellite networks,” IEEE J. Sel. Areas
+Commun., vol. 35, no. 10, pp. 2253–2267, Oct. 2017.
+[12] M. Jia, Q. Gao, Q. Guo, X. Gu and X. Shen, “Power multiplexing
+NOMA and bandwidth compression for satellite-terrestrial networks,”
+IEEE Trans. on Veh. Technol., vol. 68, no. 11, pp. 11107–11117, Nov.
+2019.
+[13] Z. Gao, A. Liu, C. Han and X. Liang, ”Sum rate maximization of
+massive MIMO NOMA in LEO satellite communication system,” in
+IEEE Wireless. Commun. Lett. , to be published.
+[14] A. Wang, L. Lei, E. Lagunas, A. I. P ´erez-Neira, S. Chatzinotas and B.
+Ottersten, “NOMA-enabled multi-beam satellite systems: joint optimiza-
+tion to overcome offered-requested Data Mismatches,” IEEE Trans. on
+Veh. Technol., vol. 70, no. 1, pp. 900–913, Jan. 2021.
+[15] H. Li, S. Zhao, Y . Li and C. Peng, ”Sum Secrecy Rate Maximization in
+NOMA-Based Cognitive Satellite-Terrestrial Network,” in IEEE Wire-
+less Communications Letters, IEEE Wireless. Commun. Lett., vol. 10,
+no. 10, pp. 2230–2234, Oct. 2021.
+[16] S. Fu, J. Gao and L. Zhao, “Integrated resource management for
+terrestrial-satellite systems,” IEEE Trans. on Veh. Technol., vol. 69, no.
+3, pp. 3256–3266, Mar. 2020.
+[17] B. Deng, C. Jiang, J. Yan, N. Ge, S. Guo and S. Zhao, “Joint
+multigroup precoding and resource allocation in integrated terrestrial-
+satellite networks,” IEEE Trans. on Veh. Technol., vol. 68, no. 8, pp.
+8075–8090, Aug. 2019.
+[18] B. Di, H. Zhang, L. Song, Y . Li and G. Y . Li, “Ultra-dense LEO:
+integrating terrestrial-satellite networks into 5G and beyond for data
+ofﬂoading,” IEEE Trans. Wireless Commun., vol. 18, no. 1, pp. 47–62,
+Jan. 2019.
+[19] Y . Zhang, L. Yin, C. Jiang and Y . Qian, ”Joint beamforming design
+and resource allocation for terrestrial-satellite cooperation system,” IEEE
+Trans. Wireless Commun., vol. 68, no. 2, pp. 778–791, Feb. 2020.
+[20] Z. Ji, S. Wu, C. Jiang and W. Wang, ”Popularity-driven content place-
+ment and multi-hop delivery for terrestrial-satellite networks,” IEEE
+Commun. Lett., vol. 24, no. 11, pp. 2574–2578, Nov. 2020.
+[21] M. Shaat, A. I. Perez-Neira, G. Femenias and F. Riera-Palou, ”Joint
+frequency assignment and ﬂow control for hybrid terrestrial-satellite
+backhauling networks,” ISWCS., Bologna, 2017, pp. 293–298.
+
+===== PAGE 11 =====
+11
+[22]
+E. Lagunas, L. Lei, S. Chatzinotas and B. Ottersten, “Power and ﬂow
+assignment for 5G integrated terrestrial-satellite backhaul networks,”
+WCNC.,2019, pp. 1–6.
+[23] Y . Cao, S. -Y . Lien and Y . -C. Liang, “Deep reinforcement Learning
+for multi-user access control in non-terrestrial networks,” IEEE Trans.
+Wireless Commun., vol. 69, no. 3, pp. 1605–1619, Mar. 2021.
+[24] X. Liao et al., ”Distributed intelligence: a veriﬁcation for multi-agent
+DRL-based multibeam satellite resource allocation,” IEEE Commun.
+Lett., vol. 24, no. 12, pp. 2785–2789, Dec. 2020.
+[25] H. Zhang, N. Yang, W. Huangfu, K. Long and V . C. M. Leung, “Power
+control based on deep reinforcement learning for spectrum sharing,”
+IEEE Trans. Wireless Commun., vol. 19, no. 6, pp. 4209–4219, Jun.
+2020.
+[26] P. V . R. Ferreira et al., “Reinforcement learning for satellite commu-
+nications: from LEO to deep space operations,” IEEE Commun. Mag.,
+vol. 57, no. 5, pp. 70–75, May. 2019.
+[27] X. Hu, S. Liu, R. Chen, W. Wang and C. Wang, “A deep reinforcement
+learning-based framework for dynamic resource allocation in multibeam
+satellite systems,” IEEE Commun. Lett., vol. 22, no. 8, pp. 1612–1615,
+Aug. 2018.
+[28] P. V . R. Ferreira et al., “Multiobjective reinforcement learning for cog-
+nitive satellite communications using deep neural network ensembles,”
+IEEE J. Sel. Areas Commun., vol. 36, no. 5, pp. 1030–1041, May. 2018.
+[29] C. Zhou et al., “Deep reinforcement learning for delay-oriented IoT
+task scheduling in space-air-ground integrated network,” IEEE Trans.
+Wireless Commun., to be published.
+[30] C. Zhong, M. C. Gursoy and S. Velipasalar, “Deep reinforcement
+learning-based edge caching in wireless networks,” IEEE Trans. Cognit.
+Commun. Networking., vol. 6, no. 1, pp. 48–61, Mar. 2020.
+[31] Z. Zhang, H. Chen, M. Hua, C. Li, Y . Huang and L. Yang, “Double
+coded caching in ultra dense networks: caching and multicast scheduling
+via deep reinforcement learning,” IEEE Trans. Commun., vol. 68, no. 2,
+pp. 1071–1086, Feb. 2020.
+[32] Y . Qian, R. Wang, J. Wu, B. Tan and H. Ren, “Reinforcement learning-
+based optimal computing and caching in mobile edge network,” IEEE
+J. Sel. Areas Commun., vol. 38, no. 10, pp. 2343–2355, Oct. 2020.
+[33] T. Zhang, Z. Wang, Y . Liu, W. Xu, and A. Nallanathan, “Joint resource,
+deployment and caching optimization for AR applications in dynamic
+UA V NOMA networks,” IEEE Trans. Wireless Commun. ,to be published.
+[34] T. Zhang, Z. Wang, Y . Liu, W. Xu and A. Nallanathan, “Caching
+placement and resource allocation for cache-enabling UA V NOMA
+networks,” IEEE Trans. on Veh. Technol., vol. 69, no. 11, pp. 12897–
+12911, Nov. 2020.
+[35] X. Li, H. Zhang, W. Li, and K. Long, “Multi-Agent DRL for user
+association and power control in Terrestrial-Satellite network,” 2021
+IEEE Global Communications Conference (GLOBECOM), 2021, pp. 1–
+5.
+[36] R. Lowe, Y . Wu, A. Tamar, J. Harb, O. P. Abbeel, and I. Mordatch, “Mul-
+tiagent actor-critic for mixed cooperative-competitive environments,”
+Proc. Adv. Neural Inf. Process. Syst., 2017, pp. 6379-6390.
+[37] K. Higuchi and Y . Kishiyama, “Non-orthogonal access with random
+beamforming and intra-beam SIC for cellular MIMO downlink,” in Proc.
+IEEE Veh. Technol. Conf. (VTC Fall), Las Vegas, NV , 2013, pp. 1–5.
+[38] X. Liu, H. Zhang, K. Long, A. Nallanathan, and V . C. M. Leung,
+“Energy efﬁcient user association, resource allocation and caching
+deployment in fog radio access networks,” IEEE Trans. on Veh. Technol.,
+vol. 71, no. 2, pp. 1846–1856, Feb. 2022.
+[39] Y . Jin, Y . Wen and C. Westphal, “Optimal transcoding and caching for
+adaptive streaming in media cloud: an analytical approach,” IEEE Trans.
+Circuits Syst. Video Technol. , vol. 25, no. 12, pp. 1914–1925, Dec. 2015.
+[40] K. Arulkumaran, M. P. Deisenroth, M. Brundage and A. A. Bharath,
+“Deep reinforcement learning: a brief survey,” IEEE Signal Process
+Mag., vol. 34, no. 6, pp. 26–38, Nov. 2017.
+[41] D. Christopoulos, S. Chatzinotas and B. Ottersten, “Multicast multigroup
+precoding and user scheduling for frame-based satellite communica-
+tions,” IEEE Trans. Wireless Commun., vol. 14, no. 9, pp. 4695–4707,
+Sept. 2015.
+XiaoNan Li recei ved the M.S. degree from the
+School of Computer and Communication Engineer-
+ing, University of Science and Technology Beijing,
+China, in 2022. His research interests include satel-
+lite communications and deep reinforcement learn-
+ing.
+Haijun Zhang (M’13, SM’17) is currently a Full
+Professor and Associate Dean at University of Sci-
+ence and Technology Beijing, China. He was a Post-
+doctoral Research Fellow in Department of Elec-
+trical and Computer Engineering, the University of
+British Columbia (UBC), Canada. He serves/served
+as Track Co-Chair of WCNC 2020, Symposium
+Chair of Globecom’19, TPC Co-Chair of INFO-
+COM 2018 Workshop on Integrating Edge Com-
+puting, Caching, and Ofﬂoading in Next Generation
+Networks, and General Co-Chair of GameNets’16.
+He serves as an Editor of IEEE Transactions on Communications, IEEE
+Transactions on Network Science and Engineering, and IEEE Transactions
+on Vehicular Technology. He received the IEEE CSIM Technical Committee
+Best Journal Paper Award in 2018, IEEE ComSoc Young Author Best Paper
+Award in 2017, and IEEE ComSoc Asia-Paciﬁc Best Young Researcher Award
+in 2019.
+Huan Zhou (M’14) received his Ph.D. degree from
+the Department of Control Science and Engineering
+at Zhejiang University. He was a visiting scholarat
+the Temple University from Nov. 2012 to May. 2013,
+and a CSC supported postdoc fellow at the Univer-
+sity of British Columbia from Nov. 2016 to Nov.
+2017. Currently, he is a full professor at the College
+of Computer and Information Technology, China
+Three Gorges University. He was a Lead Guest
+Editor of Pervasive and Mobile Computing, TPC
+Chair of EAI BDTA 2020, Local Arrangement Chair
+of I-SPAN 2018, Special Session Chair of the 3rd International Conference
+on Internet of Vehicles (IOV 2016), and TPC member of IEEE Globecom,
+ICC, ICCCN, etc. He has published more than 50 research papers in some
+international journals and conferences, including IEEE JSAC, TPDS, TWC
+and so on. His research interests include Opportunistic Mobile Networks,
+V ANETs, Mobile Data Ofﬂoading, and Mobile Edge Computing.He receives
+the Best Paper Award of I-SPAN 2014 and I-SPAN 2018, and is currently
+serving as an associate editor for IEEE ACCESS and EURASIP Journal on
+Wireless Communications and Networking.
+Ning Wang (M’13) received the B.E. degree in
+communication engineering from Tianjin University,
+China, in 2004, the M.A.Sc. degree in electrical en-
+gineering from The University of British Columbia,
+Canada, in 2010, and the Ph.D. degree in electrical
+engineering from the University of Victoria, Canada,
+in 2013. In 2013, he was on the Finalist of the
+Governor General’s Gold Medal for outstanding
+graduating doctoral student with the University of
+Victoria. From 2004 to 2008, he was with the China
+Information Technology Design and Consulting In-
+stitute as a Mobile Communication System Engineer, specializing in planning
+and design of large-scale commercial mobile communication networks, net-
+work trafﬁc analysis, and radio network optimization. From 2013 to 2015, he
+was a Postdoctoral Research Fellow with the Department of Electrical and
+Computer Engineering, The University of British Columbia. Since 2015, he
+has been with the School of Information Engineering, Zhengzhou University,
+Zhengzhou, China, where he is currently a Professor. He also holds adjunct
+appointments with the Department of Electrical and Computer Engineering,
+McMaster University, Hamilton, ON, Canada. His research interests include
+resource allocation and security designs of future cellular networks, channel
+modeling for wireless communications, statistical signal processing, and
+cooperative wireless communications. He was on the technical program
+committees of international conferences, including the IEEE GLOBECOM,
+IEEE ICC, IEEE WCNC, and CyberC.
+
+===== PAGE 12 =====
+12
+Keping Long (SM’06) received the M.S. and Ph.D.
+degrees from the University of Electronic Science
+and Technology of China, Chengdu, in 1995 and
+1998, respectively. From September 1998 to August
+2000, he was a Postdoctoral Research Fellow at the
+National Laboratory of Switching Technology and
+Telecommunication Networks, Beijing University
+of Posts and Telecommunications (BUPT), China.
+From September 2000 to June 2001, he was an
+Associate Professor at BUPT. From July 2001 to
+November 2002, he was a Research Fellow with the
+ARC Special Research Centre for Ultra Broadband Information Networks
+(CUBIN), University of Melbourne, Australia. He is currently a professor
+and Dean at the School of Computer and Communication Engineering,
+University of Science and Technology Beijing. He has published more than
+200 papers, 20 keynote speeches, and invited talks at international and
+local conferences. His research interests are optical Internet technology,
+new generation network technology, wireless information networks, value
+added services, and secure technology of networks. Dr. Long has been a
+TPC or ISC member of COIN 2003/04/05/06/07/08/09/10, IEEE IWCN2010,
+ICON2004/06, APOC2004/06/08, Co-Chair of the organization Committee
+for IWCMC2006,TPC Chair of COIN 2005/08, and TPC Co-Chair of COIN
+2008/10. He was awarded by the National Science Fund for Distinguished
+Young Scholars of China in 2007 and selected as the Chang Jiang Scholars
+Program Professor of China in 2008. He is a member of the Editorial
+Committees of Sciences in China Series F and China Communications.
+Saba Al-Rubaye (IEEE Senior Member) reader
+in Autonomous and Connected Systems and Head
+of Advanced Connectivity & System Integration
+research group in the School of Aerospace, Trans-
+port and Manufacturing at Cranﬁeld. She has more
+than 17 years of professional experience in industry
+and academia with demonstrated track record of
+launching innovative solutions in design, testing,
+consultation, leadership, and program development.
+Dr Al-Rubaye has been involved in several projects
+sponsored by Innovation UK, Research England,
+EPSRC, and Department for Transport (DfT) as well as Canada-NSERC,
+and USA Government. She is participating in developing industry standards
+by being an active research group member of IEEE P1932.1 standard of
+License/Unlicensed Interoperability and IEEE P1920.2 Standard for Vehicle-
+to-Vehicle Communications for Unmanned Aircraft Systems (UAS). Dr Al-
+Rubaye has published many papers in prestige IEEE journals and conferences
+and a recipient of the best technical paper award twice published in IEEE
+Vehicular Technology in 2011 and 2015, respectively. Dr Al-Rubaye has
+contributed as a general co-chair and organized a cutting-edge workshop for
+6G Communication Networks at IEEEICC2020 Conference in Ireland and
+was a keynote speaker for Industry day in IEEE ICCVE2019 in Austria. Her
+main research interests are UAS/Aircraft communications, 5G/6G Networks,
+Advance Air Mobility, Safety and Security of Autonomous Vehicle. She is
+a Chartered Engineer (CEng), member of IET, Life Senior member of IEEE
+and certiﬁed Unmanned Aircraft System (UAS) Pilot.
+George K. Karagiannidis (IEEE Fellow) is cur-
+rently Professor in the Electrical & Computer En-
+gineering Dept. of Aristotle University of Thes-
+saloniki, Greece and Head of Wireless Communi-
+cations & Information Processing (WCIP) Group.
+His research interests are in the areas of Wireless
+Communications Systems and Networks, Signal pro-
+cessing, Optical Wireless Communications, Wireless
+Power Transfer and Applications and Communi-
+cations & Signal Processing for Biomedical Engi-
+neering. Dr. Karagiannidis was in the past Editor
+in several IEEE journals and from 2012 to 2015 he was the Editor-in
+Chief of IEEE Communications Letters. From September 2018 to June
+2022 he served as Associate Editor-in Chief of IEEE Open Journal of
+Communications Society. Currently, he is in the Steering Committee of
+IEEE Transactions on Cognitive Communications & Networks. Recently, he
+received two prestigious awards: The 2021 IEEE Communications Society
+Radio Communications (RCC) Committee Technical Recognition Award, for
+his Outstanding Contributions to Wireless Systems and the 2018 Signal
+Processing and Communications Electronics (SPCE) Technical Recognition
+Award of the IEEE ComSoc for his Outstanding Technical Contributions
+to Signal Processing for Communications. Dr. Karagiannidis is one of the
+highly-cited authors across all areas of Electrical Engineering, recognized
+from Clarivate Analytics as Web-of-Science Highly-Cited Researcher in the
+seven consecutive years 2015-2021.
+
+===== PAGE 13 =====
+Cranfield University
+CERES Research  Repository https://dspace.lib.cranfield.ac.uk/
+School of Aerospace, Transport and Manufacturing (SATM) Staff publications (SATM)
+Multi-agent DRL for resource allocation
+and cache design in terrestrial-satellite networks
+Li, Xiaonan
+2023-08-01
+Attribution-NonCommercial 4.0 International
+Li X, Zhang H, Zhou H, et al., (2023) Multi-agent DRL for resource allocation and cache design
+in terrestrial-satellite networks. IEEE Transactions on Wireless Communications, Volume 22,
+Issue 8, August 2023, pp. 5031-5042
+https://doi.org/10.1109/TWC.2022.3231379
+Downloaded from CERES Research Repository, Cranfield University

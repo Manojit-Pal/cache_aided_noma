@@ -88,7 +88,8 @@ class LRUCache(CacheBase):
     def request(self, item: int, user_id: Optional[int] = None,
                 channel_gain: Optional[float] = None,
                 paired_user: Optional[int] = None,
-                paired_file: Optional[int] = None) -> Dict:
+                paired_file: Optional[int] = None,
+                **kwargs) -> Dict:
         result = super().request(item, user_id, channel_gain, paired_user, paired_file)
         if channel_gain is not None:
             self.file_channel_scores[item] = (
@@ -210,7 +211,8 @@ class LFUCache(CacheBase):
     def request(self, item: int, user_id: Optional[int] = None,
                 channel_gain: Optional[float] = None,
                 paired_user: Optional[int] = None,
-                paired_file: Optional[int] = None) -> Dict:
+                paired_file: Optional[int] = None,
+                **kwargs) -> Dict:
         hit = self.is_hit(item, update_stats=True, channel_gain=channel_gain)
         result = {
             'hit':                 hit,
@@ -317,7 +319,8 @@ class RandomCache(CacheBase):
     def request(self, item: int, user_id: Optional[int] = None,
                 channel_gain: Optional[float] = None,
                 paired_user: Optional[int] = None,
-                paired_file: Optional[int] = None) -> Dict:
+                paired_file: Optional[int] = None,
+                **kwargs) -> Dict:
         result = super().request(item, user_id, channel_gain, paired_user, paired_file)
         if channel_gain is not None:
             self.file_channel_scores[item] = (

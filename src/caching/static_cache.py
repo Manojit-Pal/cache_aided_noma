@@ -159,7 +159,8 @@ class StaticTopKCache(CacheBase):
     def request(self, item: int, user_id: Optional[int] = None,
                 channel_gain: Optional[float] = None,
                 paired_user: Optional[int] = None,
-                paired_file: Optional[int] = None) -> Dict:
+                paired_file: Optional[int] = None,
+                **kwargs) -> Dict:
         """
         NOMA-aware request handling.
         
