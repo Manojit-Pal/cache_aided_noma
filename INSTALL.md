@@ -7,7 +7,7 @@ Comprehensive installation instructions for the Cache-Aided NOMA project.
 ## 📋 **Prerequisites**
 
 ### **System Requirements**
-- **Python:** 3.8, 3.9, 3.10, or 3.11
+- **Python:** 3.8, 3.9, 3.10, 3.11, or 3.12
 - **RAM:** Minimum 8 GB (16 GB recommended for large-scale experiments)
 - **Disk Space:** ~2 GB (for dependencies + experiment results)
 - **GPU (Optional):** NVIDIA GPU with CUDA 11.8 or 12.1 for faster training
@@ -19,7 +19,7 @@ python --version
 python3 --version
 ```
 
-Expected output: `Python 3.8.x`, `Python 3.9.x`, `Python 3.10.x`, or `Python 3.11.x`
+Expected output: `Python 3.8.x`, `Python 3.9.x`, `Python 3.10.x`, `Python 3.11.x`, or `Python 3.12.x`
 
 ---
 
@@ -158,8 +158,11 @@ python test_dqn_cache.py
 
 ### **Quick Experiment**
 ```bash
-# Run quick comparison (10-15 minutes)
+# Run quick comparison (~10-15 minutes)
 python run_comparison.py --quick
+
+# Or run a quick DQN smoke test (~2-3 minutes)
+python -m src.simulation.train_and_evaluate_dqn --debug
 ```
 
 ---
@@ -170,8 +173,9 @@ python run_comparison.py --quick
 
 | Python | NumPy  | PyTorch | CUDA   | Status |
 |--------|--------|---------|--------|--------|
-| 3.10   | 1.24   | 2.1     | 11.8   | ✅     |
+| 3.12   | 1.26   | 2.4     | 12.1   | ✅     |
 | 3.11   | 1.26   | 2.2     | CPU    | ✅     |
+| 3.10   | 1.24   | 2.1     | 11.8   | ✅     |
 | 3.9    | 1.23   | 2.0     | 12.1   | ✅     |
 | 3.8    | 1.23   | 2.0     | CPU    | ✅     |
 
@@ -341,20 +345,25 @@ Once installation is complete:
    python run_comparison.py --quick
    ```
 
-2. **View Results:**
+2. **Run DQN Smoke Test:**
+   ```bash
+   python -m src.simulation.train_and_evaluate_dqn --debug
+   ```
+
+3. **View Results:**
    ```bash
    # Results saved in results/ directory
    ls results/
    ```
 
-3. **Read Documentation:**
+4. **Read Documentation:**
    - `README.md` - Project overview
    - `src/config.py` - Configuration options
    - `test_dqn_cache.py` - DQN testing
 
-4. **Run Full Experiment:**
+5. **Run Full Experiment:**
    ```bash
-   python run_comparison.py
+   python run_comparison.py --full
    ```
 
 ---

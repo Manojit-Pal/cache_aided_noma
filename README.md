@@ -37,13 +37,13 @@ This project implements a **Cache-Aided Non-Orthogonal Multiple Access (NOMA)** 
 
 ### 🌟 What Makes This Unique?
 
-1. **Cache-Aided Interference Cancellation (CIC)**: When a strong NOMA user has the weak user's file cached, it can perform **perfect interference cancellation**, dramatically improving system performance.
+1. **Cache-Aided Interference Cancellation (CIC)**: When a paired NOMA user has the other user's requested file cached, it can perform **perfect interference cancellation** — the weak user eliminates strong-user interference entirely, and the strong user achieves perfect SIC (ζ=0). This dramatically improves SINR by 2–10×.
 
-2. **Deep Q-Network (DQN) Cache**: Uses state-of-the-art deep reinforcement learning to learn optimal caching policies that maximize cache hits while considering NOMA-specific benefits.
+2. **Deep Q-Network (DQN) Cache**: Uses a Dueling DQN with Prioritized Experience Replay and a binary action space (`skip` / `cache`) to learn optimal caching policies that maximize CIC opportunities while maintaining high cache hit rates.
 
-3. **Complete NOMA Implementation**: Full support for Successive Interference Cancellation (SIC), power allocation, user pairing, and channel modeling.
+3. **Cache-Aware Power Allocation**: Dynamically adjusts NOMA power coefficients based on cache status, exploiting CIC to save transmit power while maintaining QoS targets.
 
-4. **Research-Grade Code**: Production-ready implementation with comprehensive testing, bug fixes, and documentation.
+4. **Complete NOMA Implementation**: Full support for Successive Interference Cancellation (SIC) with configurable imperfection, multiple power allocation strategies, extreme user pairing, and multi-fading channel models.
 
 ---
 
@@ -52,93 +52,71 @@ This project implements a **Cache-Aided Non-Orthogonal Multiple Access (NOMA)** 
 ### 🔄 NOMA Components
 
 - **Successive Interference Cancellation (SIC)**
-  - Imperfect SIC with configurable residual interference
-  - Perfect SIC for cached content (CIC)
+  - Imperfect SIC with configurable residual interference factor (ζ=0.05)
+  - Cache-aided perfect SIC when partner's file is cached (ζ=0)
   - Strong user decodes weak user's signal first
 
 - **Cache-Aided Interference Cancellation (CIC)**
-  - When strong user has weak user's file cached → perfect SIC
-  - Eliminates interference completely
-  - Bonus reward in DQN learning (+7 vs -1)
+  - Weak user CIC: partner's (strong) file is cached → interference fully eliminated
+  - Strong user CIC: partner's (weak) file is cached → perfect SIC (ζ=0)
+  - Both users can independently benefit from CIC
+  - CIC reward bonus in DQN learning (+1.5)
 
 - **Power Allocation Strategies**
-  - Closed-form allocation
+  - Closed-form analytical allocation
   - Grid search optimization
-  - Cache-aware dynamic allocation
+  - **Cache-aware dynamic allocation** (novel — adjusts p_w/p_s based on CIC status)
   - Sum-rate maximization
   - Energy-efficient allocation
 
 - **User Pairing**
-  - Extreme pairing (best + worst channel)
+  - Extreme pairing (weakest ↔ strongest channel) — default
   - Random pairing
   - Sequential pairing
 
 - **Channel Modeling**
-  - Rayleigh fading (NLOS)
-  - Rician fading (LOS)
-  - Mixed fading (urban/suburban)
-  - Path loss with distance
-  - AWGN
+  - Rayleigh fading (NLoS)
+  - Rician fading (LoS with K-factor)
+  - Mixed fading (probabilistic LoS/NLoS)
+  - Distance-dependent path loss
+  - Time-varying channels (Jake's Doppler model)
 
 ### 🧠 Deep Reinforcement Learning
 
-- **Dueling DQN Architecture**
+- **Dueling DQN Architecture (v2 — Binary Action)**
+  - Binary action space: `0=skip`, `1=cache` (v2 redesign for faster convergence)
   - Separates value and advantage streams
-  - Better state-value estimation
-  - Research-standard network (128-128)
+  - Compact network: [64, 32] hidden dims
 
 - **Prioritized Experience Replay (PER)**
   - Samples important transitions more frequently
   - Beta annealing (0.4 → 1.0) over training
-  - Smart sampling strategy (with/without replacement)
+  - Alpha priority exponent: 0.6
 
 - **NOMA-Aware State Representation**
   - LRU counters (recency)
   - LFU counters (frequency)
-  - File popularity (EMA)
+  - File popularity (EMA-tracked)
   - Channel quality (mean, std)
   - NOMA metrics (CIC rate, success rate)
   - Cache occupancy
 
-- **Research-Based Training**
-  - 2000 episodes (4x research minimum)
-  - Epsilon decay over first 50% (1.0 → 0.01)
-  - Soft target updates every step (τ=0.005)
-  - Gradient clipping for stability
-  - Warm-up period (1000 steps)
+- **Training Configuration (v2)**
+  - 500 episodes × 10,000 steps/episode = 5M total steps
+  - Epsilon decay: 1.0 → 0.01 over 2M steps (40%)
+  - Learning rate: 0.001 (10× faster than v1)
+  - Soft target updates (τ=0.005)
+  - Gradient clipping (max norm=10.0)
+  - Warm-up: 2,000 steps
 
 ### 📊 Caching Policies
 
-- **DQN**: Deep Q-Network (our approach)
-- **TopK**: Cache K most popular files
-- **LRU**: Least Recently Used
-- **LFU**: Least Frequently Used
-- **Random**: Random replacement
-- **NO-CACHE**: Baseline (no caching)
-
-### 🛠️ Implementation Quality
-
-- ✅ **7 Critical Bug Fixes**
-  - #1: Popularity EMA double-decay
-  - #2: Beta annealing in PER
-  - #3: Smart sampling strategy
-  - #4: Soft target updates
-  - #5: Empty slot handling
-  - #6: Warm-up period
-  - #7: CIC-aware rewards
-
-- ✅ **Comprehensive Testing**
-  - 46 NOMA integration tests
-  - 10 DQN component tests
-  - 6 utility function tests
-  - 97.5% test pass rate
-
-- ✅ **Professional Tooling**
-  - CLI with 12 options
-  - Configuration presets
-  - Result visualization
-  - Model checkpointing
-  - Progress tracking
+- **DQN**: Deep Q-Network with CIC-aware rewards (our approach)
+- **TopK**: Cache K most popular files (static baseline)
+- **LRU**: Least Recently Used (dynamic baseline)
+- **LFU**: Least Frequently Used (dynamic baseline)
+- **Random**: Random replacement (dynamic baseline)
+- **NO-CACHE**: Traditional NOMA without caching (baseline)
 
 ---
 
@@ -152,35 +130,11 @@ cd cache_aided_noma
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run quick test (10-15 minutes)
+# 3. Run quick test (~10-15 minutes)
 python run_comparison.py --quick
 
 # 4. View results
 open results/cache_aided_vs_traditional_noma.png
-```
-
-**Expected output:**
-```
-✅ Configuration validated successfully
-
-================================================================================
-                     CACHE-AIDED NOMA COMPARATIVE ANALYSIS
-================================================================================
-
-📄 Random seed: 2025
-...
-
-Processing TOPK policy...
-  ✅ TOPK completed
-
-Processing DQN (trained) policy...
-  ✅ DQN (trained) completed
-
-✅ COMPARISON COMPLETE
-   Total data points: 126
-
-✅ Saved: results/cache_aided_vs_traditional_noma.png
-✅ SUCCESS
 ```
 
 ---
@@ -189,7 +143,7 @@ Processing DQN (trained) policy...
 
 ### Prerequisites
 
-- Python 3.8, 3.9, 3.10, or 3.11
+- Python 3.8, 3.9, 3.10, 3.11, or 3.12
 - pip (Python package manager)
 - (Optional) NVIDIA GPU with CUDA 11.8 or 12.1
 
@@ -227,56 +181,59 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available())"
 ```
 cache_aided_noma/
 │
-├── 📄 README.md                      # This file
-├── 📄 INSTALL.md                     # Detailed installation guide
-├── 📄 requirements.txt               # Python dependencies
-├── 📄 LICENSE                        # MIT License
+├── 📄 README.md                        # This file
+├── 📄 INSTALL.md                       # Detailed installation guide
+├── 📄 requirements.txt                 # Python dependencies
+├── 📄 IEEE_Paper.tex                   # Research paper (LaTeX)
 │
-├── 🚀 run_comparison.py              # Main experiment runner (CLI)
-├── 🧪 test_dqn_cache.py             # DQN unit tests (10 tests)
-├── 🧪 test_noma_integration.py      # NOMA integration tests (46 tests)
-├── 🧪 test_noma_sim.py              # NOMA simulation tests
-├── 🎓 train_and_evaluate_dqn.py     # DQN-specific training
+├── 🚀 run_comparison.py                # Main experiment runner (CLI)
+├── 🎓 train_and_evaluate_dqn.py        # DQN training entry point (root)
+├── 🧪 test_dqn_cache.py               # DQN unit tests
+├── 🧪 test_noma_integration.py        # NOMA integration tests
+├── 🧪 test_noma_sim.py                # NOMA simulation tests
 │
-├── 📦 src/                          # Source code
+├── 📦 src/                            # Source code
 │   ├── 📄 __init__.py
-│   ├── ⚙️  config.py                # Configuration parameters
-│   ├── 🛠️  utils.py                 # Utility functions (700+ lines)
+│   ├── ⚙️  config.py                  # All configuration parameters
+│   ├── 🛠️  utils.py                   # Zipf sampling, stats, I/O utilities
 │   │
-│   ├── 💾 caching/                  # Cache implementations
-│   │   ├── cache_base.py           # Base cache class
-│   │   ├── dqn_cache_final.py      # DQN cache (NOMA-aware)
-│   │   ├── topk_cache.py           # TopK policy
-│   │   ├── lru_cache.py            # LRU policy
-│   │   ├── lfu_cache.py            # LFU policy
-│   │   └── random_cache.py         # Random policy
+│   ├── 💾 caching/                    # Cache implementations
+│   │   ├── __init__.py               # Factory: create_cache()
+│   │   ├── cache_base.py             # Abstract base class (NOMA-aware)
+│   │   ├── dqn_cache_final.py        # DQN cache agent (v2 binary-action)
+│   │   ├── static_cache.py           # StaticTopKCache
+│   │   ├── dynamic_cache.py          # LRU, LFU, Random policies
+│   │   ├── test_caching_policies.py  # Caching policy tests
+│   │   └── verify_init.py            # Init verification script
 │   │
-│   ├── 📡 noma/                     # NOMA components
-│   │   ├── channel_model.py        # Fading, path loss
-│   │   ├── sic.py                  # Successive Interference Cancellation
-│   │   ├── power_allocation.py     # Power allocation strategies
-│   │   ├── user_pairing.py         # User pairing algorithms
-│   │   └── noma_base.py            # Core NOMA functions
+│   ├── 📡 noma/                       # NOMA physical layer
+│   │   ├── __init__.py               # Public API re-exports
+│   │   ├── channel_model.py          # Fading, path loss, mobility
+│   │   ├── noma_base.py              # User pairing, NOMA pair simulation
+│   │   ├── power_allocation.py       # 5 power allocation strategies
+│   │   └── sic.py                    # SIC/CIC, SINR formulas
 │   │
-│   ├── 🔬 simulation/               # Simulation engines
-│   │   ├── noma_caching_sim.py     # NOMA + cache simulation
-│   │   ├── stable_dqn_sim.py       # DQN training pipeline
-│   │   └── comparative_analysis.py # Multi-policy comparison
+│   ├── 🔬 simulation/                 # Simulation engines
+│   │   ├── __init__.py               # Conditional imports
+│   │   ├── noma_caching_sim.py       # General NOMA + cache simulator
+│   │   ├── stable_dqn_sim.py         # DQN trainer + policy evaluator
+│   │   └── train_and_evaluate_dqn.py # End-to-end pipeline script
 │   │
-│   └── 📊 experiments/              # Experiment scripts
-│       └── comparative_analysis.py # Full comparison framework
+│   └── 📊 experiments/                # Experiment scripts
+│       └── comparative_analysis.py   # SNR-sweep Monte Carlo comparison
 │
-├── 📊 results/                      # Experiment results
-│   ├── cache_aided_vs_traditional_noma.png
-│   ├── comparative_analysis_results.csv
-│   └── performance_summary.txt
+├── 🔧 cic_pairing/                   # CIC pairing analysis utilities
+│   ├── cic_pairing_analysis.py       # CIC pairing visualization
+│   ├── diagnose_and_fix.py           # Diagnostic utilities
+│   └── quick_cic_check.py            # Quick CIC verification
 │
-├── 🧠 models/                       # Trained models
-│   └── dqn_cache/
-│       └── dqn_cache_final.pth     # DQN checkpoint
-│
-├── 📚 docs/                         # Documentation
-└── 🔧 checkpoints/                  # Training checkpoints
+├── 📊 results/                        # Experiment results
+├── 📊 results_csv/                    # CSV result archives
+├── 📊 results_pdf/                    # PDF result archives
+├── 📊 results_pic/                    # Image result archives
+├── 🧠 models/                         # Trained DQN models
+├── 🔧 checkpoints/                    # Training checkpoints
+└── 📚 docs/                           # Documentation
 ```
 
 ---
@@ -292,72 +249,49 @@ cache_aided_noma/
 
 **SINR (Weak User):**
 ```
-γ_w = (p_w * h_w) / (p_s * h_w + N_0)
+γ_w = (P · p_w · h_w) / (P · p_s · h_w + N₀)
 ```
 
 **SINR (Strong User, after SIC):**
 ```
-γ_s = (p_s * h_s) / (ζ * p_w * h_s + N_0)
+γ_s = (P · p_s · h_s) / (ζ · P · p_w · h_s + N₀)
 ```
 where ζ = SIC imperfection factor (0.05 default)
 
 ### Cache-Aided Interference Cancellation (CIC)
 
-**Perfect SIC when strong user has weak user's file cached:**
+**Weak User CIC — when weak user has strong user's file cached:**
 ```
-γ_s^CIC = (p_s * h_s) / N_0    (ζ = 0, perfect cancellation)
+γ_w^CIC = (P · p_w · h_w) / N₀    (interference fully eliminated)
 ```
+Improvement factor: 1 + P·p_s·h_w/N₀ → typically 2–10× SINR gain.
 
-**Benefit:**
-- SINR improvement: ~10-20 dB
-- Enables higher modulation/coding schemes
-- Reduces outage probability by 30-50%
-
-### Power Allocation
-
-**Closed-Form (Target Rate):**
-```python
-def allocate_power_closed_form(h_w, h_s, R_target):
-    alpha = 2^(2*R_target) - 1
-    p_w = alpha * N_0 * (h_s + alpha * h_w) / (h_w * h_s)
-    p_s = 1 - p_w
-    return p_w, p_s
+**Strong User CIC — when strong user has weak user's file cached:**
+```
+γ_s^CIC = (P · p_s · h_s) / N₀    (ζ = 0, perfect SIC)
 ```
 
-**Cache-Aware:**
-- Adjusts power based on cache status
-- Exploits CIC for weak user → reduces p_w
-- Reallocates power to strong user
+### Cache-Aware Power Allocation
 
-### DQN State Representation
+Dynamic power adjustment based on CIC status:
 
-**State Vector (106 dimensions for cache_size=50):**
+| Scenario | Effect |
+|----------|--------|
+| No cache | Standard closed-form allocation |
+| Weak user cached | Lower p_w needed (CIC removes interference) |
+| Strong user cached | More power for weak user (perfect SIC, ζ=0) |
+| Both cached | Maximum flexibility, balanced midpoint |
+
+### DQN Reward Function (v2 — Immediate Rewards)
+
 ```
-[
-  LRU_counters[50],      # Normalized timesteps since access
-  LFU_counters[50],      # Normalized access frequency
-  file_popularity[1],    # Requested file's EMA popularity
-  cache_occupancy[1],    # Current cache fullness
-  channel_mean[1],       # Mean channel gain (recent)
-  channel_std[1],        # Channel gain variability
-  cic_success_rate[1],   # Recent CIC enablement rate
-  noma_success_rate[1]   # Recent NOMA transmission success
-]
-```
++2.0   Cache hit (no wireless transmission needed)
++1.5   CIC enabled (cached partner's file → perfect cancellation)
+ 0.0   Standard cache miss (neutral)
 
-### DQN Reward Function
-
-```python
-Reward Structure:
-  +10: Cache hit (best - no transmission needed)
-  +7:  CIC enabled (good - perfect SIC for strong user)
-  -1:  NOMA success without CIC (acceptable)
-  -5:  NOMA failure (bad - retransmission needed)
-  -10: Outage (worst - no communication)
-  
-BER Modifiers:
-  +1:  BER < 10^-4 (excellent quality)
-  -2:  BER > 10^-2 (poor quality)
+Additional modifiers:
+  + popularity_weight    Bonus for caching popular files
+  + cic_bonus (1.5)      When file enables CIC for paired user
 ```
 
 ---
@@ -375,7 +309,7 @@ python run_comparison.py --quick
 
 ```bash
 # Full comparison: 2000 episodes, ~2-3 hours
-python run_comparison.py
+python run_comparison.py --full
 
 # Custom configuration
 python run_comparison.py --snr-min 0 --snr-max 30 --policies topk lru dqn
@@ -384,45 +318,47 @@ python run_comparison.py --snr-min 0 --snr-max 30 --policies topk lru dqn
 ### 3. DQN-Specific Training
 
 ```bash
-# Train DQN cache only
-python train_and_evaluate_dqn.py
+# Quick smoke test (~2-3 min)
+python -m src.simulation.train_and_evaluate_dqn --debug
 
-# Custom training
-python train_and_evaluate_dqn.py --episodes 1000 --eval-runs 50
+# Full training + evaluation pipeline
+python -m src.simulation.train_and_evaluate_dqn
 ```
 
 ### 4. Testing
 
 ```bash
-# Test NOMA integration (46 tests)
+# Test NOMA integration
 python test_noma_integration.py
 
-# Test DQN cache (10 tests)
+# Test DQN cache
 python test_dqn_cache.py
+
+# Test simulation
+python test_noma_sim.py
 
 # Test utilities
 python -m src.utils
 ```
 
-### 5. CLI Options
+### 5. CLI Options — `run_comparison.py`
 
 ```bash
 Usage: run_comparison.py [OPTIONS]
 
 Options:
-  --quick              Quick test mode (100 episodes)
-  --full               Full experiment (2000 episodes)
-  --policies POLICIES  Policies to compare (topk,lru,lfu,random,dqn)
-  --no-dqn             Skip DQN training
-  --snr-min SNR_MIN    Minimum SNR in dB (default: -10)
-  --snr-max SNR_MAX    Maximum SNR in dB (default: 30)
-  --snr-step STEP      SNR step size (default: 2)
-  --mc-runs RUNS       Monte Carlo realizations (default: 1000)
-  --output-dir DIR     Results directory (default: results/)
-  --seed SEED          Random seed (default: 2025)
-  --config CONFIG      Configuration preset (quick/full/aggressive/conservative)
-  --verbose            Enable verbose output
-  --no-plots           Skip plot generation
+  --quick                  Quick test mode (100 episodes, 10 runs)
+  --full                   Full experiment (2000 episodes, 100 runs)
+  --no-dqn                 Skip DQN training
+  --policies POLICIES      Policies to compare (topk, lru, lfu, random, none, dqn)
+  --snr-min SNR_MIN        Minimum SNR in dB (default: -10)
+  --snr-max SNR_MAX        Maximum SNR in dB (default: 30)
+  --snr-step STEP          SNR step size in dB (default: 2)
+  --num-realizations N     Monte Carlo realizations per SNR point (default: 1000)
+  --output-dir DIR         Results directory (default: results/)
+  --config CONFIG          Preset: default, aggressive, conservative
+  --seed SEED              Random seed (default: 2025)
+  --verbose                Enable verbose output
 ```
 
 **Examples:**
@@ -431,11 +367,11 @@ Options:
 # Compare only TopK and DQN
 python run_comparison.py --policies topk dqn
 
-# High SNR regime
+# High SNR regime only
 python run_comparison.py --snr-min 10 --snr-max 40
 
 # More Monte Carlo runs for smoother curves
-python run_comparison.py --mc-runs 2000
+python run_comparison.py --num-realizations 2000
 
 # Conservative learning (more stable)
 python run_comparison.py --config conservative
@@ -447,29 +383,33 @@ python run_comparison.py --config conservative
 
 ### Configuration File: `src/config.py`
 
-**Key Parameters:**
+**Key Parameters (v2 — Binary-Action DQN):**
 
 ```python
 # Content Catalog
-NUM_FILES = 2000          # Total files
-CACHE_SIZE = 200          # 10% cache penetration
+NUM_FILES = 2000          # Total files in catalog
+CACHE_SIZE = 200          # ~10% cache penetration
 ZIPF_ALPHA = 1.0          # Popularity skew
 
 # NOMA System
 NUM_USERS = 200           # Users per cell
+REQUESTS_PER_USER = 50    # Requests per user per episode
 TX_POWER = 2.0            # Watts
 CELL_RADIUS = 500.0       # Meters
 SIC_IMPERFECTION = 0.05   # ζ = 5%
 TARGET_RATE_BPS = 0.3     # bps/Hz
+PAIRING_METHOD = "extreme"       # extreme / random / sequential
+POWER_ALLOC_METHOD = "cache_aware" # cache_aware / closedform / gridsearch / sumrate_max / energy_efficient
 
-# DQN Training (Research Standard)
-RL_TRAINING_EPISODES = 2000     # 4x research minimum
-RL_STEPS_PER_EPISODE = 200      # Fast iterations
-RL_EPSILON_DECAY_STEPS = 200000 # Decay over 50%
-RL_GAMMA = 0.99                 # Long-term planning
-RL_LEARNING_RATE = 0.0001       # Standard Adam LR
-RL_BATCH_SIZE = 64              # Standard batch
-RL_HIDDEN_DIMS = [128, 128]     # Research architecture
+# DQN Training (v2 — Binary-Action)
+RL_TRAINING_EPISODES = 500        # v2: was 2000 (converges faster)
+RL_STEPS_PER_EPISODE = 10_000     # 200 users × 50 requests
+RL_EPSILON_DECAY_STEPS = 2_000_000
+RL_GAMMA = 0.99
+RL_LEARNING_RATE = 0.001          # v2: 10× faster (simpler problem)
+RL_BATCH_SIZE = 64
+RL_HIDDEN_DIMS = [64, 32]         # v2: compact network
+RL_REPLAY_BUFFER_SIZE = 50_000    # v2: 5× steps/episode
 
 # Prioritized Replay
 RL_USE_PRIORITIZED_REPLAY = True
@@ -481,25 +421,20 @@ RL_PRIORITY_BETA_END = 1.0
 ### Configuration Presets
 
 ```python
-# Quick test (10-15 minutes)
 from src import config as cfg
-cfg.set_quick_test_config()
 
-# Full experiment (2-3 hours)
-cfg.set_full_experiment_config()
-
-# Aggressive learning (faster, less stable)
-cfg.set_aggressive_learning_config()
-
-# Conservative learning (slower, more stable)
-cfg.set_conservative_learning_config()
+cfg.set_debug_config()              # ~1-2 min (tiny scale, 50 episodes)
+cfg.set_quick_test_config()         # ~5-10 min (100 episodes)
+cfg.set_full_experiment_config()    # ~2-3 hours (2000 episodes)
+cfg.set_aggressive_learning_config()   # Faster, less stable
+cfg.set_conservative_learning_config() # Slower, more stable
 ```
 
 ---
 
 ## 📊 Results
 
-### Sample Results
+### Output Files
 
 After running `python run_comparison.py`, you'll get:
 
@@ -510,38 +445,30 @@ results/cache_aided_vs_traditional_noma.png
 9-subplot figure showing:
 - Outage probability vs SNR
 - Sum rate vs SNR
-- Hit rate vs SNR
-- CIC benefit vs SNR
-- NOMA success rate vs SNR
-- Average BER vs SNR
+- Cache hit rate vs SNR
+- CIC benefit rate vs SNR
+- SIC success rate vs SNR
+- BER (weak & strong users) vs SNR
 - Spectral efficiency vs SNR
 - Energy efficiency vs SNR
-- Policy comparison bar chart
+- Jain's Fairness Index vs SNR
 
 **2. Numerical Results**
 ```
 results/comparative_analysis_results.csv
 ```
-All metrics for all policies at all SNR points
 
 **3. Summary Statistics**
 ```
 results/performance_summary.txt
 ```
-Mean, std, min, max for each metric
 
 ### Expected Performance Gains
 
-**DQN vs TopK (typical):**
-- Hit rate: +15-25%
-- Outage probability: -30-50%
-- Sum rate: +20-35%
-- CIC enablement: +40-60%
-
-**Cache-Aided vs Traditional NOMA:**
-- Outage probability: -40-60% reduction
-- Strong user SINR: +10-20 dB improvement
-- System capacity: +30-50% increase
+**Cache-Aided NOMA vs Traditional NOMA:**
+- Outage probability: −40–60% reduction
+- Sum rate: +30–50% improvement
+- Strong user SINR: +10–20 dB with CIC
 
 ---
 
@@ -549,49 +476,28 @@ Mean, std, min, max for each metric
 
 ### Test Suite Overview
 
-| Test File | Tests | Coverage |
-|-----------|-------|----------|
-| `test_noma_integration.py` | 46 | NOMA modules |
-| `test_dqn_cache.py` | 10 | DQN components |
-| `src/utils.py` | 6 | Utilities |
-| **Total** | **62** | **97.5%** |
+| Test File | Coverage |
+|-----------|----------|
+| `test_noma_integration.py` | NOMA modules (channel, SIC, power, pairing) |
+| `test_dqn_cache.py` | DQN components (state, action, reward, learning) |
+| `test_noma_sim.py` | Simulation engine |
+| `src/caching/test_caching_policies.py` | All caching policies |
 
 ### Run All Tests
 
 ```bash
 # NOMA integration
 python test_noma_integration.py
-# Expected: ✅ 46/46 passed
 
 # DQN cache
 python test_dqn_cache.py
-# Expected: ✅ 9/10 passed (1 cosmetic issue)
+
+# Simulation
+python test_noma_sim.py
 
 # Utilities
 python -m src.utils
-# Expected: ✅ 6/6 passed
 ```
-
-### Test Details
-
-**NOMA Tests:**
-- Channel modeling (path loss, fading)
-- SIC (standard, cache-aware, residual interference)
-- Power allocation (closed-form, cache-aware, sum-rate)
-- User pairing (extreme, random)
-- System simulation (end-to-end)
-
-**DQN Tests:**
-- Initialization & configuration
-- State representation (LRU/LFU/NOMA)
-- Action selection (epsilon-greedy)
-- Reward function (NOMA-aware)
-- Learning loop (stability)
-- Evaluation mode
-- Model persistence (save/load)
-- NOMA integration (CIC/SIC)
-- Warmup period
-- Beta annealing
 
 ---
 
@@ -631,8 +537,8 @@ If you use this code in your research, please cite:
 **Related Papers:**
 - Schaul et al., "Prioritized Experience Replay", ICLR 2016
 - Wang et al., "Dueling Network Architectures for Deep RL", ICML 2016
-- Lillicrap et al., "Continuous Control with Deep RL", ICLR 2016
-- IEEE DeepChunk, "Deep Q-Learning for Chunk-based Caching", 2019
+- arXiv:1712.09557, "Cache-Aided Non-Orthogonal Multiple Access", 2018
+- arXiv:1909.11074, "Power Allocation in Cache-Aided NOMA", 2019
 
 ---
 
@@ -646,7 +552,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Research Papers**: Implementations based on state-of-the-art DRL and NOMA research
 - **PyTorch Team**: For the excellent deep learning framework
-- **OpenAI**: For reinforcement learning insights
 
 ---
 

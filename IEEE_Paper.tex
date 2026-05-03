@@ -1,6 +1,13 @@
 \documentclass[conference]{IEEEtran}
 \IEEEoverridecommandlockouts
 
+\makeatletter
+\newcommand{\newlineauthors}{%
+  \end{@IEEEauthorhalign}\hfill\mbox{}\par
+  \mbox{}\hfill\begin{@IEEEauthorhalign}
+}
+\makeatother
+
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{algorithmic}
@@ -25,37 +32,31 @@ CIC-Aware Proactive Cache Placement}
 \IEEEauthorblockA{\textit{Dept. of Information Technology}\\
 \textit{Techno Main Salt Lake}\\
 Kolkata, India\\
-13000222028@tmsl.ac.in}
+akash.lawrencian2020@gmail.com}
 \and
 \IEEEauthorblockN{Arpita Guchhait}
 \IEEEauthorblockA{\textit{Dept. of Information Technology}\\
 \textit{Techno Main Salt Lake}\\
 Kolkata, India\\
-13000222031@tmsl.ac.in}
+arpitaguchhait2020@gmail.com}
 \and
 \IEEEauthorblockN{Manojit Pal}
 \IEEEauthorblockA{\textit{Dept. of Information Technology}\\
 \textit{Techno Main Salt Lake}\\
 Kolkata, India\\
-13000222036@tmsl.ac.in}
-\and
+manojitmunmun@gmail.com}
+\newlineauthors
 \IEEEauthorblockN{Vaibhav Anand}
 \IEEEauthorblockA{\textit{Dept. of Information Technology}\\
 \textit{Techno Main Salt Lake}\\
 Kolkata, India\\
-13000222037@tmsl.ac.in}
+anandvaibhav0107@gmail.com}
 \and
 \IEEEauthorblockN{Dr. Biswajit Ghosh}
 \IEEEauthorblockA{\textit{Dept. of Information Technology}\\
 \textit{Techno Main Salt Lake}\\
 Kolkata, India \\
-biswajit.ghosh@tmsl.ac.in}
-\and
-\IEEEauthorblockN{Mr. Abdul Aziz}
-\IEEEauthorblockA{\textit{Dept. of Information Technology}\\
-\textit{Techno Main Salt Lake}\\
-Kolkata, India \\
-abdul.aziz@tmsl.ac.in}
+biswanerist@gmail.com}
 }
 
 \maketitle
@@ -124,14 +125,14 @@ where $\alpha = 1.0$ dictates the skewness parameter of content popularity.
 Each down-link user $k$ is characterized by a channel gain $h_k$, modeled as a product of distance-dependent path loss and small-scale fading. Path loss is formulated as $d_k^{-\beta}$ with a path loss exponent $\beta = 3.5$. To capture the heterogeneous propagation environments expected in 6G deployments, small-scale fading is modeled via a mixed fading distribution: Rayleigh fading with probability $(1 - p_{\text{LoS}})$ and Rician fading featuring a K-factor of $K_{\text{dB}} = 10$ dB with a line-of-sight probability $p_{\text{LoS}} = 0.4$.
 
 \subsection{NOMA Transmission}
-Users are organized into NOMA pairs utilizing an \textit{extreme pairing} strategy: the user experiencing the highest channel gain (strong user, $s$) is multiplexed with the user experiencing the lowest channel gain (weak user, $w$) to optimize the NOMA diversity gain. The BS transmits a power-domain superimposed signal:
+Users are organized into NOMA pairs utilizing an \textit{extreme pairing} strategy: the user experiencing the highest channel gain (strong user, $s$) is multiplexed with the user experiencing the lowest channel gain (weak user, $w$) to maximize the NOMA channel disparity gain. The BS transmits a power-domain superimposed signal:
 
 \begin{equation}
 x = \sqrt{\alpha_w P} x_w + \sqrt{\alpha_s P} x_s
 \label{eq:noma_tx}
 \end{equation}
 
-where $P$ denotes the global transmit power budget, $\alpha_w = 0.8$ and $\alpha_s = 0.2$ are the fixed power allocation coefficients for the weak and strong user, respectively (satisfying $\alpha_w + \alpha_s = 1$).
+where $P$ denotes the global transmit power budget and $\alpha_w + \alpha_s = 1$.
 
 Under traditional interference constraints, the received signal-to-interference-plus-noise ratio (SINR) at the weak user is defined as:
 
@@ -149,11 +150,56 @@ The strong user is mandated to first decode the weak user's signal via SIC, prio
 
 A transmission outage event occurs if $\gamma_k < \gamma_{\text{th}}$, where the threshold $\gamma_{\text{th}} = 2^{R_{\text{th}}} - 1$ corresponds perfectly to a system target rate $R_{\text{th}} = 0.3$ bps/Hz.
 
-\subsection{Cache-Aided Interference Cancellation (CIC)}
-When the exact file requested by the paired user $j$ is actively available within the BS edge-cache, the primary requesting user $k$ can theoretically reconstruct and seamlessly cancel the interference term $\sqrt{\alpha_j P} x_j$ directly from the waveform without executing traditional SIC decoding procedures. This \textit{Cache-aided IC} completely eliminates residual errors, effectively enforcing $\zeta = 0$. The CIC benefit rate measures the system efficiency of this phenomenon, defined as the average frequency of CIC events per NOMA transmission miss:
+\subsection{Cache-Aware Dynamic Power Allocation}
+Unlike conventional NOMA systems that employ fixed power coefficients, the proposed framework employs a \textit{cache-aware dynamic power allocation} strategy that adapts $\alpha_w$ and $\alpha_s$ in real-time based on the CIC status of each NOMA pair. Four distinct operational scenarios arise:
+
+\begin{enumerate}
+\item \textbf{No cache (baseline):} Standard closed-form SINR-constrained allocation is applied, yielding default coefficients $(\alpha_w, \alpha_s) = (0.8, 0.2)$.
+
+\item \textbf{Weak-user CIC:} When the weak user has the strong user's file cached, interference at the weak receiver is entirely eliminated. Consequently, the minimum power required to satisfy the weak user's SINR target drops significantly:
+\begin{equation}
+\alpha_w^{\min} = \frac{\gamma_{\text{th}} \sigma^2}{P |h_w|^2}
+\label{eq:pw_cic}
+\end{equation}
+The surplus power is retained for the strong user, reducing overall transmit energy.
+
+\item \textbf{Strong-user CIC:} When the strong user has the weak user's file cached, perfect SIC is achieved ($\zeta = 0$). The feasible power region for $\alpha_w$ expands as:
+\begin{equation}
+\alpha_w^{\max} = 1 - \frac{\gamma_{\text{th}} \sigma^2}{P |h_s|^2}
+\label{eq:pw_psic}
+\end{equation}
+More power is thus allocated to the weak user (up to 70\% of the feasible range), directly boosting cell-edge throughput.
+
+\item \textbf{Both cached:} Maximum flexibility is achieved. A balanced midpoint allocation within the expanded feasible region is applied, simultaneously optimizing both user rates.
+\end{enumerate}
+
+This cache-aware adaptation is critical because CIC fundamentally alters the interference structure of the NOMA pair; applying static power coefficients in the presence of CIC would waste the interference-free operating regime.
+
+\subsection{Hybrid SIC/CIC Interference Management}
+The proposed system employs a \textit{hybrid SIC/CIC} interference management framework that dynamically selects the most effective cancellation technique for each NOMA pair based on real-time cache status. This hybrid approach seamlessly blends traditional imperfect SIC with cache-enabled perfect interference cancellation.
+
+\textbf{Weak-User CIC:} When the weak user has the strong user's requested file $x_s$ available in its local cache, it can perfectly reconstruct the interference term $\sqrt{\alpha_s P} x_s$ and subtract it from the received superimposed signal. This completely eliminates multi-user interference at the weak receiver, yielding:
 
 \begin{equation}
-\rho_{\text{CIC}} = \frac{|\{\text{NOMA misses where paired file is cached}\}|}{|\{\text{NOMA transmissions}\}|}
+\gamma_w^{\text{CIC}} = \frac{\alpha_w P |h_w|^2}{\sigma^2}
+\label{eq:sinr_weak_cic}
+\end{equation}
+
+Compared to the standard SINR in \eqref{eq:sinr_weak}, the interference term $\alpha_s P |h_w|^2$ is entirely removed from the denominator, providing a multiplicative SINR improvement factor of $1 + \alpha_s P |h_w|^2 / \sigma^2$, which typically yields a 2--10$\times$ gain in practical operating regimes.
+
+\textbf{Strong-User CIC:} When the strong user has the weak user's requested file $x_w$ cached, it achieves \textit{perfect SIC} by reconstructing the weak user's signal exactly from cache rather than relying on error-prone decoded estimates. This sets the residual interference factor to $\zeta = 0$:
+
+\begin{equation}
+\gamma_s^{\text{CIC}} = \frac{\alpha_s P |h_s|^2}{\sigma^2}
+\label{eq:sinr_strong_cic}
+\end{equation}
+
+Both CIC modes can operate independently---a single NOMA pair may benefit from weak-user CIC only, strong-user CIC only, or \textit{full CIC} when both users have the partner's file cached. This hybrid framework naturally degrades to standard imperfect SIC when no cached content is available, ensuring backward compatibility.
+
+The CIC benefit rate measures the system-level exploitation efficiency, defined as:
+
+\begin{equation}
+\rho_{\text{CIC}} = \frac{|\{\text{NOMA pairs where at least one CIC mode is active}\}|}{|\{\text{Total NOMA transmissions}\}|}
 \label{eq:cic_rate}
 \end{equation}
 
@@ -204,7 +250,7 @@ We formulate the online cache placement problem as a continuous Markov Decision 
 
 \textbf{State space:} Upon receiving a request at step $t$, the extracted state vector $s_t \in \mathbb{R}^{14}$ encodes:
 (i) Normalized popularity rank of the requested file,
-(ii) Localized recent request frequency array,
+(ii) Localized recent request frequency scalar of the target file,
 (iii) Binary cache membership boolean indicator,
 (iv) Cache storage occupancy ratio,
 (v--vii) Scalar mean, min, and max historical popularity traits of currently cached files,
@@ -288,7 +334,8 @@ Baseline fading profile & Mixed (Rayleigh + Rician) \\
 Rician K-factor properties & $K_{\text{dB}} = 10$, $p_{\text{LoS}} = 0.4$ \\
 Hardware SIC flaw coefficient $\zeta$ & 0.05 \\
 Dynamic Target Rate $R_{\text{th}}$ & 0.3 bps/Hz \\
-NOMA power split $(\alpha_w, \alpha_s)$ & (0.8, 0.2) \\
+Default NOMA power split $(\alpha_w, \alpha_s)$ & (0.8, 0.2) \\
+Power allocation strategy & Cache-aware dynamic \\
 \midrule
 \textit{Deep Q-Network Hyperparameters} & \\
 Total training episodes $E$ & 500 ($5 \times 10^6$ global steps) \\
@@ -439,7 +486,7 @@ Consequently, localized cached payload deliveries explicitly bypass base-station
 %=============================================================
 \section{Conclusion}
 
-This paper has definitively formalized a Double Dueling Deep Q-Network pipeline structured specifically around proactively generating localized caching policies mapped mathematically into NOMA network transmission paths for dynamic 6G infrastructure. Replacing infinite algorithmic decision boundaries with a strict binary resolution model interacting sequentially with a heavily condensed 14-dimensional channel state, the module autonomously isolates optimal delivery sequences prioritizing the exclusive reconstruction elements driving Cache-Aided Interference Cancellation (CIC). Independent Monte Carlo validations effectively verify sustained performance evaluations matching explicit ideal oracle limitations down to 0.54\% hit probability variances. Simultaneously isolating multi-user interplay rewards results directly inside unprecedented 5.28x factor CIC expansions. These properties effectively guarantee comprehensive reductions dictating absolute operational downtime (reducing outage thresholds uniformly 14x against base limitations), firmly justifying Deep RL frameworks acting centrally inside interconnected 6G edge communication layers.
+This paper has definitively formalized a Double Dueling Deep Q-Network pipeline structured specifically around proactively generating localized caching policies mapped mathematically into NOMA network transmission paths for dynamic 6G infrastructure. Replacing infinite algorithmic decision boundaries with a strict binary resolution model interacting sequentially with a heavily condensed 14-dimensional channel state, the module autonomously isolates optimal delivery sequences prioritizing the exclusive reconstruction elements driving Cache-Aided Interference Cancellation (CIC). The proposed hybrid SIC/CIC framework enables both weak-user and strong-user interference cancellation modes, while the cache-aware dynamic power allocation strategy adapts transmit power coefficients in real-time to exploit the altered interference structure---delivering additional energy savings and throughput gains beyond what static power allocation can achieve. Independent Monte Carlo validations effectively verify sustained performance evaluations matching explicit ideal oracle limitations down to 0.54\% hit probability variances. Simultaneously isolating multi-user interplay rewards results directly inside unprecedented 5.28x factor CIC expansions. These properties effectively guarantee comprehensive reductions dictating absolute operational downtime (reducing outage thresholds uniformly 14x against base limitations), firmly justifying Deep RL frameworks acting centrally inside interconnected 6G edge communication layers.
 
 Future exploration trajectories anticipate formulating scaled reinforcement interactions targeting dynamic user mobility topologies combined intimately via localized federated network coordination deployments spanning wide-area multi-cell coverage bounds.
 
@@ -448,7 +495,7 @@ Future exploration trajectories anticipate formulating scaled reinforcement inte
 % ACKNOWLEDGMENT
 %=============================================================
 \section*{Acknowledgment}
-The authors respectfully acknowledge the critical project steering and invaluable supervisory oversight uniquely contributed by Dr. Biswajit Ghosh and Mr. Abdul Aziz representing the Department of Information Technology situated within Techno Main Salt Lake, directly facilitating the core developments powering this Project.
+The authors respectfully acknowledge the critical project steering and invaluable supervisory oversight uniquely contributed by Dr. Biswajit Ghosh representing the Department of Information Technology situated within Techno Main Salt Lake, directly facilitating the core developments powering this Project.
 
 
 %=============================================================
@@ -549,3 +596,4 @@ in \textit{Proc. ICLR}, 2016.
 \end{thebibliography}
 
 \end{document}
+
