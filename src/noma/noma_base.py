@@ -78,6 +78,7 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
         if (optimize_power
                 and hasattr(cfg, 'POWER_ALLOC_METHOD')
                 and cfg.POWER_ALLOC_METHOD == 'cache_aware'):
+            # ── HYBRID CIC: power allocation knows about cache status ──
             try:
                 from .power_allocation import allocate_power_cache_aware
                 p_w, p_s, power_feasible, power_info = allocate_power_cache_aware(
@@ -91,7 +92,30 @@ def simulate_noma_pair(gain_weak: float, gain_strong: float, cfg,
                 p_w = cfg.POWER_COEFF_WEAK
                 p_s = cfg.POWER_COEFF_STRONG
                 power_info = {'method': 'config_default', 'reason': str(e)}
+
+        elif (optimize_power
+                and hasattr(cfg, 'POWER_ALLOC_METHOD')
+                and cfg.POWER_ALLOC_METHOD in ('closedform', 'gridsearch',
+                                                'sumrate_max', 'energy_efficient')):
+            # ── STANDARD CIC: power allocation is channel-dynamic but cache-BLIND ──
+            # Does NOT receive weak_cached / strong_cached → pure channel-based PA
+            try:
+                from .power_allocation import allocate_power
+                p_w, p_s, power_feasible, power_info = allocate_power(
+                    gain_weak, gain_strong, cfg,
+                    method=cfg.POWER_ALLOC_METHOD
+                )
+                if not power_feasible:
+                    p_w = cfg.POWER_COEFF_WEAK
+                    p_s = cfg.POWER_COEFF_STRONG
+                    power_info['method'] = f'{cfg.POWER_ALLOC_METHOD}_failed_fallback'
+            except (ImportError, AttributeError) as e:
+                p_w = cfg.POWER_COEFF_WEAK
+                p_s = cfg.POWER_COEFF_STRONG
+                power_info = {'method': 'config_default', 'reason': str(e)}
+
         else:
+            # ── FALLBACK: use fixed config constants ──
             p_w = cfg.POWER_COEFF_WEAK
             p_s = cfg.POWER_COEFF_STRONG
             power_info = {'method': 'config_default'}
