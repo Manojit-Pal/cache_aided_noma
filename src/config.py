@@ -28,7 +28,7 @@ ZIPF_ALPHA = 1.0        # Zipf skew parameter (1.0 = strong skew)
 # ------------------------------
 # Users & requests
 # ------------------------------
-NUM_USERS = 200         # number of users in the cell
+NUM_USERS = 16          # number of users in the cell
 REQUESTS_PER_USER = 50  # number of requests per user per episode
 
 # ------------------------------
@@ -107,11 +107,11 @@ OUTAGE_SINR_MARGIN = 2.0
 # ------------------------------
 # Training Configuration
 # v2: binary action space → faster convergence → fewer episodes needed
-# Steps per episode = NUM_USERS * REQUESTS_PER_USER = 10,000
+# Steps per episode = NUM_USERS * REQUESTS_PER_USER = 800
 # ------------------------------
 RL_TRAINING_EPISODES   = 500          # v2: was 2000 (converges faster)
-RL_STEPS_PER_EPISODE   = 10_000       # NUM_USERS(200) x REQ_PER_USER(50)
-RL_TRAINING_STEPS      = 5_000_000    # 500 x 10,000
+RL_STEPS_PER_EPISODE   = 800          # NUM_USERS(16) x REQ_PER_USER(50)
+RL_TRAINING_STEPS      = 400_000      # 500 x 800
 
 # ------------------------------
 # Epsilon-Greedy Exploration
@@ -119,7 +119,7 @@ RL_TRAINING_STEPS      = 5_000_000    # 500 x 10,000
 # ------------------------------
 RL_EPSILON_START        = 1.0
 RL_EPSILON_END          = 0.01
-RL_EPSILON_DECAY_STEPS  = 2_000_000   # v2: 40% of total (was 50%)
+RL_EPSILON_DECAY_STEPS  = 200_000     # v2: 40% of total (was 50%)
 RL_EVAL_EPSILON         = 0.0
 
 # ------------------------------
@@ -138,7 +138,7 @@ RL_GAMMA              = 0.99     # Discount factor
 RL_BATCH_SIZE         = 64
 
 # v2: smaller buffer needed (simpler transitions, faster convergence)
-RL_REPLAY_BUFFER_SIZE = 50_000   # v2: was 500K (5x steps_per_ep is enough)
+RL_REPLAY_BUFFER_SIZE = 10_000   # v2: ~12.5x steps_per_ep
 
 # ------------------------------
 # Training Stability
@@ -154,7 +154,7 @@ RL_TRAIN_FREQUENCY    = 4      # v2: was 10 (binary action = cleaner signal)
 # Warm-Up Period
 # v2: shorter warm-up since buffer fills with useful data faster
 # ------------------------------
-RL_WARM_UP_STEPS = 2_000     # v2: was 15K (binary action fills buffer faster)
+RL_WARM_UP_STEPS = 800       # v2: 1x steps_per_ep
 
 # ------------------------------
 # Reward Function Parameters (v2 — immediate, caching-quality focused)
@@ -181,7 +181,7 @@ RL_USE_PRIORITIZED_REPLAY  = True
 RL_PRIORITY_ALPHA          = 0.6
 RL_PRIORITY_BETA_START     = 0.4
 RL_PRIORITY_BETA_END       = 1.0
-RL_PRIORITY_BETA_FRAMES    = 5_000_000  # v2: = RL_TRAINING_STEPS
+RL_PRIORITY_BETA_FRAMES    = 400_000    # v2: = RL_TRAINING_STEPS
 
 # ------------------------------
 # Popularity Tracking
@@ -241,7 +241,7 @@ def set_debug_config():
 
     NUM_FILES          = 100
     CACHE_SIZE         = 10
-    NUM_USERS          = 20
+    NUM_USERS          = 16
     REQUESTS_PER_USER  = 20
 
     _steps_per_ep = NUM_USERS * REQUESTS_PER_USER   # 400
