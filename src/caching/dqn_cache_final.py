@@ -150,10 +150,11 @@ class PrioritizedReplayBuffer:
 
     def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray):
         for idx, err in zip(indices, td_errors):
-            p = float(abs(err) + 1e-6)
+            # Clamp priority to prevent runaway growth (FIX: exploding loss)
+            p = min(float(abs(err) + 1e-6), 100.0)
             if 0 <= idx < len(self.priorities):
                 self.priorities[idx] = p
-                self.max_priority    = max(self.max_priority, p)
+                self.max_priority    = min(max(self.max_priority, p), 100.0)
 
     def get_beta(self) -> float:
         return self.beta
@@ -703,12 +704,17 @@ class DQNCache(CacheBase):
         next_states = _t('next_state', np.float32)
         dones       = _t('done',       np.float32)
 
+        # Clamp rewards and target Q to prevent value explosion (FIX: exploding loss)
+        rewards = rewards.clamp(-5.0, 5.0)
+
         current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
             next_a   = self.q_network(next_states).argmax(1)
             next_q   = self.target_network(next_states).gather(
                            1, next_a.unsqueeze(1)).squeeze(1)
             target_q = rewards + (1.0 - dones) * self.gamma * next_q
+            # Clamp target Q to reasonable range
+            target_q = target_q.clamp(-10.0, 10.0)
         td_errors = target_q - current_q
         loss = (weights * F.smooth_l1_loss(
             current_q, target_q, reduction='none')).mean()

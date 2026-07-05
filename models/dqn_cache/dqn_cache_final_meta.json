@@ -1,7 +1,7 @@
 {
-  "episode": 79,
-  "hit_rate": 0.5375,
-  "outage_probability": 0.05405405405405406,
-  "cic_benefit_rate": 2.7972972972972974,
-  "timestamp": "2026-07-04T19:32:41.234946"
+  "episode": 499,
+  "hit_rate": 0.56125,
+  "outage_probability": 0.15384615384615385,
+  "cic_benefit_rate": 3.1082621082621085,
+  "timestamp": "2026-07-05T20:04:44.134910"
 }
