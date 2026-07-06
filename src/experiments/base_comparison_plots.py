@@ -137,58 +137,48 @@ def generate_channel_gains_vectorized(num_users, cell_radius, pl_exponent,
 # SCHEME SIMULATORS (vectorized per-pair)
 # =============================================================================
 
-def simulate_oma(gains, P_tx, noise, num_users):
+def simulate_cache_aided_oma(gains, P_tx, noise, num_users, cache_hit_rate, rng):
     """
-    OMA (TDMA): Each user gets 1/num_users of the bandwidth.
-    Rate_k = (1/num_users) * log2(1 + P * g_k / sigma^2)
-    No interference. Outage if rate < target.
+    Cache-Aided OMA (TDMA).
+    If a user has a cache hit, they are served locally at CACHE_DELIVERY_RATE.
+    Users with cache misses share the wireless bandwidth/time equally (OMA TDMA).
+    Outage is defined over wireless-served (cache-miss) users only.
     """
+    if num_users == 0:
+        return 0.0, 0.0, 0.0
+
     snr_per_user = P_tx * gains / noise
-    rates = (1.0 / num_users) * np.log2(1 + snr_per_user)
-    sum_rate = rates.sum()
 
-    # Outage: user is in outage if its rate < target
-    user_outages = rates < TARGET_RATE
-    # System outage = fraction of users in outage
-    outage_prob = user_outages.mean()
-
-    return sum_rate, outage_prob
-
-
-def simulate_conventional_noma(gains, P_tx, noise, alpha_w, alpha_s, zeta,
-                                sinr_th):
-    """
-    Conventional NOMA: 2-user pairs, imperfect SIC, no caching.
-    Extreme pairing: weakest with strongest.
-    """
-    sorted_gains = np.sort(gains)
-    num_users = len(sorted_gains)
-    num_pairs = num_users // 2
-
+    cache_hits = 0
     total_rate = 0.0
     outage_count = 0
 
-    for i in range(num_pairs):
-        g_w = sorted_gains[i]                 # weak user (low gain)
-        g_s = sorted_gains[num_users - 1 - i] # strong user (high gain)
+    # Bernoulli cache hits per user
+    hits = rng.random(num_users) < cache_hit_rate
+    num_hits = int(np.sum(hits))
+    num_misses = num_users - num_hits
 
-        # Weak user SINR: treats strong signal as interference
-        sinr_w = (alpha_w * P_tx * g_w) / (alpha_s * P_tx * g_w + noise)
+    # Equal-share OMA TDMA among miss users
+    bw_fraction = 1.0 / num_misses if num_misses > 0 else 0.0
 
-        # Strong user: imperfect SIC (residual = zeta * weak signal power)
-        sinr_s = (alpha_s * P_tx * g_s) / (zeta * alpha_w * P_tx * g_s + noise)
+    for i in range(num_users):
+        if hits[i]:
+            # Local delivery, not limited by wireless channel
+            total_rate += cfg.CACHE_DELIVERY_RATE
+            cache_hits += 1
+        else:
+            rate = bw_fraction * np.log2(1.0 + snr_per_user[i])
+            total_rate += rate
+            if rate < TARGET_RATE:
+                outage_count += 1
 
-        rate_w = np.log2(1 + sinr_w)
-        rate_s = np.log2(1 + sinr_s)
+    # Outage probability conditioned on being a wireless-served (miss) user
+    outage_prob = (outage_count / num_misses) if num_misses > 0 else 0.0
 
-        total_rate += rate_w + rate_s
+    # Cache hit ratio over all users
+    hr = cache_hits / num_users
 
-        # Pair outage: either user fails
-        if sinr_w < sinr_th or sinr_s < sinr_th:
-            outage_count += 1
-
-    outage_prob = outage_count / num_pairs if num_pairs > 0 else 1.0
-    return total_rate, outage_prob
+    return total_rate, outage_prob, hr
 
 
 def simulate_cache_aided_noma(gains, P_tx, noise, alpha_w, alpha_s, zeta,
@@ -367,8 +357,7 @@ def run_snr_sweep(snr_db_range, num_trials, hit_rates, cache_size=CACHE_SIZE, ve
     Run Monte Carlo simulation across SNR range for all schemes.
     """
     results = {
-        'OMA':                  {'sum_rate': [], 'outage': []},
-        'Conv. NOMA':           {'sum_rate': [], 'outage': []},
+        'Cache-Aided OMA':      {'sum_rate': [], 'outage': [], 'hit_rate': []},
         'Cache-Aided NOMA':     {'sum_rate': [], 'outage': [], 'hit_rate': []},
         'Hybrid Cache\nTDMA-NOMA': {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
         'Hybrid (LRU)':         {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
@@ -396,17 +385,12 @@ def run_snr_sweep(snr_db_range, num_trials, hit_rates, cache_size=CACHE_SIZE, ve
             gain_avg = np.mean(gains)
             noise_power = P_tx * gain_avg / snr_linear
 
-            # --- OMA ---
-            sr, op = simulate_oma(gains, P_tx, noise_power, NUM_USERS)
-            acc['OMA']['sum_rate'] += sr
-            acc['OMA']['outage'] += op
-
-            # --- Conventional NOMA ---
-            sr, op = simulate_conventional_noma(
-                gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
-                SINR_THRESHOLD)
-            acc['Conv. NOMA']['sum_rate'] += sr
-            acc['Conv. NOMA']['outage'] += op
+            # --- Cache-Aided OMA (Top-K) ---
+            sr, op, hr = simulate_cache_aided_oma(
+                gains, P_tx, noise_power, NUM_USERS, hit_rates['Top-K'], rng)
+            acc['Cache-Aided OMA']['sum_rate'] += sr
+            acc['Cache-Aided OMA']['outage'] += op
+            acc['Cache-Aided OMA']['hit_rate'] += hr
 
             # --- Cache-Aided NOMA (Top-K) ---
             sr, op, hr = simulate_cache_aided_noma(
@@ -461,7 +445,8 @@ def run_snr_sweep(snr_db_range, num_trials, hit_rates, cache_size=CACHE_SIZE, ve
         if verbose:
             hybrid_key = 'Hybrid Cache\nTDMA-NOMA'
             print(f"  SNR = {snr_db:+3d} dB  ({elapsed:.1f}s)  |  "
-                  f"OMA={results['OMA']['sum_rate'][-1]:.2f}  "
+                  f"C-OMA={results['Cache-Aided OMA']['sum_rate'][-1]:.2f}  "
+                  f"C-NOMA={results['Cache-Aided NOMA']['sum_rate'][-1]:.2f}  "
                   f"Hybrid={results[hybrid_key]['sum_rate'][-1]:.2f}  "
                   f"LRU={results['Hybrid (LRU)']['sum_rate'][-1]:.2f}  "
                   f"LFU={results['Hybrid (LFU)']['sum_rate'][-1]:.2f}  "
@@ -478,8 +463,7 @@ def run_cache_size_sweep(cache_sizes, hit_rates_dict, snr_db=20, num_trials=500,
     P_tx = snr_linear * NOISE_POWER
 
     hit_results = {
-        'OMA':                  [],
-        'Conv. NOMA':           [],
+        'Cache-Aided OMA':      [],
         'Cache-Aided NOMA':     [],
         'Hybrid Cache\nTDMA-NOMA': [],
         'Hybrid (LRU)':         [],
@@ -495,11 +479,8 @@ def run_cache_size_sweep(cache_sizes, hit_rates_dict, snr_db=20, num_trials=500,
         lfu_hr = simulate_dynamic_cache_hit_rate(LFUCache, cs, NUM_FILES, ZIPF_ALPHA)
         rnd_hr = simulate_dynamic_cache_hit_rate(RandomCache, cs, NUM_FILES, ZIPF_ALPHA)
 
-        # OMA and Conv. NOMA have no cache
-        hit_results['OMA'].append(0.0)
-        hit_results['Conv. NOMA'].append(0.0)
-
-        # Both caching schemes use Top-K → same analytical hit rate
+        # Both OMA and NOMA caching schemes use Top-K → same analytical hit rate
+        hit_results['Cache-Aided OMA'].append(cache_hit_rate)
         hit_results['Cache-Aided NOMA'].append(cache_hit_rate)
         hit_results['Hybrid Cache\nTDMA-NOMA'].append(cache_hit_rate)
         hit_results['Hybrid (LRU)'].append(lru_hr)
@@ -522,9 +503,7 @@ def run_cache_size_sweep(cache_sizes, hit_rates_dict, snr_db=20, num_trials=500,
 
 # Style configuration
 SCHEME_STYLES = {
-    'OMA':                  {'color': '#2196F3', 'marker': 's', 'linestyle': '--',
-                             'linewidth': 2.0, 'markersize': 8},
-    'Conv. NOMA':           {'color': '#F44336', 'marker': 'o', 'linestyle': '-.',
+    'Cache-Aided OMA':      {'color': '#2196F3', 'marker': 's', 'linestyle': '--',
                              'linewidth': 2.0, 'markersize': 8},
     'Cache-Aided NOMA':     {'color': '#4CAF50', 'marker': '^', 'linestyle': ':',
                              'linewidth': 2.0, 'markersize': 9},
@@ -640,7 +619,7 @@ def plot_cache_hit_vs_size(cache_sizes, hit_results, save_dir):
 
 def main():
     print("=" * 70)
-    print("BASE COMPARISON: OMA vs Conv. NOMA vs Cache-Aided NOMA vs Hybrid")
+    print("BASE COMPARISON: Cache-Aided OMA vs Cache-Aided NOMA vs Hybrid Variants")
     print("=" * 70)
     print(f"\nParameters (from TeX Table I):")
     print(f"  Users (K)     : {NUM_USERS}")
@@ -736,3 +715,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
