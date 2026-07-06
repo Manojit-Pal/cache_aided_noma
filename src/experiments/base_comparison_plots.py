@@ -34,6 +34,7 @@ from src import config as cfg
 from src.utils import set_seed
 from src.noma.channel_model import generate_user_positions, pathloss, rayleigh_gain
 from src.noma.noma_base import sinr_threshold_from_rate, rate_from_sinr, pair_users_extreme
+from src.caching.dynamic_cache import LRUCache, LFUCache, RandomCache
 
 
 # =============================================================================
@@ -84,6 +85,27 @@ def top_k_cache_hit_rate(num_files, cache_size, alpha):
     """
     probs = zipf_probabilities(num_files, alpha)
     return np.sum(probs[:cache_size])
+
+
+def simulate_dynamic_cache_hit_rate(cache_class, capacity, num_files, alpha, num_requests=10000):
+    """Simulate a dynamic cache to find its steady-state hit rate under Zipf traffic."""
+    cache = cache_class(capacity=capacity)
+    probs = zipf_probabilities(num_files, alpha)
+    # Generate Zipf requests
+    requests = np.random.choice(np.arange(num_files), size=num_requests, p=probs)
+    
+    # Warm-up phase
+    for req in requests[:num_requests//2]:
+        cache.is_hit(int(req), update_stats=True)
+        
+    # Measurement phase
+    hits = 0
+    measured_requests = requests[num_requests//2:]
+    for req in measured_requests:
+        if cache.is_hit(int(req), update_stats=True):
+            hits += 1
+            
+    return hits / len(measured_requests)
 
 
 # =============================================================================
@@ -340,19 +362,18 @@ def simulate_hybrid_cache_tdma_noma(gains, P_tx, noise, alpha_w, alpha_s,
 # MAIN SIMULATION LOOP
 # =============================================================================
 
-def run_snr_sweep(snr_db_range, num_trials, cache_size=CACHE_SIZE, verbose=True):
+def run_snr_sweep(snr_db_range, num_trials, hit_rates, cache_size=CACHE_SIZE, verbose=True):
     """
-    Run Monte Carlo simulation across SNR range for all 4 schemes.
-    Returns dict of results keyed by scheme name.
+    Run Monte Carlo simulation across SNR range for all schemes.
     """
-    cache_hit_rate = top_k_cache_hit_rate(NUM_FILES, cache_size, ZIPF_ALPHA)
-
     results = {
         'OMA':                  {'sum_rate': [], 'outage': []},
         'Conv. NOMA':           {'sum_rate': [], 'outage': []},
         'Cache-Aided NOMA':     {'sum_rate': [], 'outage': [], 'hit_rate': []},
-        'Hybrid Cache\nTDMA-NOMA': {'sum_rate': [], 'outage': [], 'hit_rate': [],
-                                    'cic_count': []},
+        'Hybrid Cache\nTDMA-NOMA': {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
+        'Hybrid (LRU)':         {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
+        'Hybrid (LFU)':         {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
+        'Hybrid (Random)':      {'sum_rate': [], 'outage': [], 'hit_rate': [], 'cic_count': []},
     }
 
     for snr_db in snr_db_range:
@@ -387,22 +408,49 @@ def run_snr_sweep(snr_db_range, num_trials, cache_size=CACHE_SIZE, verbose=True)
             acc['Conv. NOMA']['sum_rate'] += sr
             acc['Conv. NOMA']['outage'] += op
 
-            # --- Cache-Aided NOMA ---
+            # --- Cache-Aided NOMA (Top-K) ---
             sr, op, hr = simulate_cache_aided_noma(
                 gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
-                SINR_THRESHOLD, cache_hit_rate, rng)
+                SINR_THRESHOLD, hit_rates['Top-K'], rng)
             acc['Cache-Aided NOMA']['sum_rate'] += sr
             acc['Cache-Aided NOMA']['outage'] += op
             acc['Cache-Aided NOMA']['hit_rate'] += hr
 
-            # --- Hybrid Cache TDMA-NOMA ---
+            # --- Hybrid Cache TDMA-NOMA (Top-K) ---
             sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
                 gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
-                SINR_THRESHOLD, cache_hit_rate, rng)
+                SINR_THRESHOLD, hit_rates['Top-K'], rng)
             acc['Hybrid Cache\nTDMA-NOMA']['sum_rate'] += sr
             acc['Hybrid Cache\nTDMA-NOMA']['outage'] += op
             acc['Hybrid Cache\nTDMA-NOMA']['hit_rate'] += hr
             acc['Hybrid Cache\nTDMA-NOMA']['cic_count'] += cc
+
+            # --- Hybrid Cache (LRU) ---
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['LRU'], rng)
+            acc['Hybrid (LRU)']['sum_rate'] += sr
+            acc['Hybrid (LRU)']['outage'] += op
+            acc['Hybrid (LRU)']['hit_rate'] += hr
+            acc['Hybrid (LRU)']['cic_count'] += cc
+
+            # --- Hybrid Cache (LFU) ---
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['LFU'], rng)
+            acc['Hybrid (LFU)']['sum_rate'] += sr
+            acc['Hybrid (LFU)']['outage'] += op
+            acc['Hybrid (LFU)']['hit_rate'] += hr
+            acc['Hybrid (LFU)']['cic_count'] += cc
+
+            # --- Hybrid Cache (Random) ---
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_tx, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['Random'], rng)
+            acc['Hybrid (Random)']['sum_rate'] += sr
+            acc['Hybrid (Random)']['outage'] += op
+            acc['Hybrid (Random)']['hit_rate'] += hr
+            acc['Hybrid (Random)']['cic_count'] += cc
 
         # Average over trials
         for scheme in results:
@@ -414,14 +462,15 @@ def run_snr_sweep(snr_db_range, num_trials, cache_size=CACHE_SIZE, verbose=True)
             hybrid_key = 'Hybrid Cache\nTDMA-NOMA'
             print(f"  SNR = {snr_db:+3d} dB  ({elapsed:.1f}s)  |  "
                   f"OMA={results['OMA']['sum_rate'][-1]:.2f}  "
-                  f"NOMA={results['Conv. NOMA']['sum_rate'][-1]:.2f}  "
-                  f"Cache={results['Cache-Aided NOMA']['sum_rate'][-1]:.2f}  "
-                  f"Hybrid={results[hybrid_key]['sum_rate'][-1]:.2f} bps/Hz")
+                  f"Hybrid={results[hybrid_key]['sum_rate'][-1]:.2f}  "
+                  f"LRU={results['Hybrid (LRU)']['sum_rate'][-1]:.2f}  "
+                  f"LFU={results['Hybrid (LFU)']['sum_rate'][-1]:.2f}  "
+                  f"Rnd={results['Hybrid (Random)']['sum_rate'][-1]:.2f} bps/Hz")
 
     return results
 
 
-def run_cache_size_sweep(cache_sizes, snr_db=20, num_trials=500, verbose=True):
+def run_cache_size_sweep(cache_sizes, hit_rates_dict, snr_db=20, num_trials=500, verbose=True):
     """
     Sweep cache size at fixed SNR for Cache Hit Ratio plot.
     """
@@ -433,10 +482,18 @@ def run_cache_size_sweep(cache_sizes, snr_db=20, num_trials=500, verbose=True):
         'Conv. NOMA':           [],
         'Cache-Aided NOMA':     [],
         'Hybrid Cache\nTDMA-NOMA': [],
+        'Hybrid (LRU)':         [],
+        'Hybrid (LFU)':         [],
+        'Hybrid (Random)':      [],
     }
 
     for cs in cache_sizes:
         cache_hit_rate = top_k_cache_hit_rate(NUM_FILES, cs, ZIPF_ALPHA)
+        
+        # Simulate dynamic caches for the current cache size
+        lru_hr = simulate_dynamic_cache_hit_rate(LRUCache, cs, NUM_FILES, ZIPF_ALPHA)
+        lfu_hr = simulate_dynamic_cache_hit_rate(LFUCache, cs, NUM_FILES, ZIPF_ALPHA)
+        rnd_hr = simulate_dynamic_cache_hit_rate(RandomCache, cs, NUM_FILES, ZIPF_ALPHA)
 
         # OMA and Conv. NOMA have no cache
         hit_results['OMA'].append(0.0)
@@ -445,11 +502,16 @@ def run_cache_size_sweep(cache_sizes, snr_db=20, num_trials=500, verbose=True):
         # Both caching schemes use Top-K → same analytical hit rate
         hit_results['Cache-Aided NOMA'].append(cache_hit_rate)
         hit_results['Hybrid Cache\nTDMA-NOMA'].append(cache_hit_rate)
+        hit_results['Hybrid (LRU)'].append(lru_hr)
+        hit_results['Hybrid (LFU)'].append(lfu_hr)
+        hit_results['Hybrid (Random)'].append(rnd_hr)
 
         if verbose:
             print(f"  Cache size = {cs:4d}  |  "
-                  f"Hit rate = {cache_hit_rate:.4f}  "
-                  f"({cache_hit_rate*100:.1f}%)")
+                  f"Top-K = {cache_hit_rate:.4f}  "
+                  f"LRU = {lru_hr:.4f}  "
+                  f"LFU = {lfu_hr:.4f}  "
+                  f"Rnd = {rnd_hr:.4f}")
 
     return hit_results
 
@@ -468,6 +530,12 @@ SCHEME_STYLES = {
                              'linewidth': 2.0, 'markersize': 9},
     'Hybrid Cache\nTDMA-NOMA': {'color': '#9C27B0', 'marker': 'D', 'linestyle': '-',
                                 'linewidth': 2.5, 'markersize': 9},
+    'Hybrid (LRU)':         {'color': '#E91E63', 'marker': 'v', 'linestyle': '--',
+                             'linewidth': 2.0, 'markersize': 8},
+    'Hybrid (LFU)':         {'color': '#FFC107', 'marker': '>', 'linestyle': '-.',
+                             'linewidth': 2.0, 'markersize': 8},
+    'Hybrid (Random)':      {'color': '#795548', 'marker': '<', 'linestyle': ':',
+                             'linewidth': 2.0, 'markersize': 8},
 }
 
 
@@ -592,8 +660,16 @@ def main():
     print(f"  MC trials     : {NUM_MC_TRIALS}")
 
     # Top-K analytical hit rate
-    analytical_hr = top_k_cache_hit_rate(NUM_FILES, CACHE_SIZE, ZIPF_ALPHA)
-    print(f"\n  Top-K analytical cache hit rate: {analytical_hr:.4f} ({analytical_hr*100:.1f}%)")
+    hit_rates = {
+        'Top-K': top_k_cache_hit_rate(NUM_FILES, CACHE_SIZE, ZIPF_ALPHA),
+        'LRU': simulate_dynamic_cache_hit_rate(LRUCache, CACHE_SIZE, NUM_FILES, ZIPF_ALPHA),
+        'LFU': simulate_dynamic_cache_hit_rate(LFUCache, CACHE_SIZE, NUM_FILES, ZIPF_ALPHA),
+        'Random': simulate_dynamic_cache_hit_rate(RandomCache, CACHE_SIZE, NUM_FILES, ZIPF_ALPHA),
+    }
+    print(f"\n  Top-K hit rate: {hit_rates['Top-K']:.4f}")
+    print(f"  LRU hit rate  : {hit_rates['LRU']:.4f}")
+    print(f"  LFU hit rate  : {hit_rates['LFU']:.4f}")
+    print(f"  Random hit rate: {hit_rates['Random']:.4f}")
 
     # Output directory
     save_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'results', 'base_comparison')
@@ -608,7 +684,7 @@ def main():
     print(f"{'='*70}\n")
 
     t_start = time.time()
-    results = run_snr_sweep(SNR_DB_RANGE, NUM_MC_TRIALS)
+    results = run_snr_sweep(SNR_DB_RANGE, NUM_MC_TRIALS, hit_rates)
     t_elapsed = time.time() - t_start
     print(f"\nSNR sweep completed in {t_elapsed:.1f}s")
 
@@ -619,7 +695,7 @@ def main():
     print("RUNNING CACHE SIZE SWEEP (Plot 3)")
     print(f"{'='*70}\n")
 
-    hit_results = run_cache_size_sweep(CACHE_SIZE_SWEEP)
+    hit_results = run_cache_size_sweep(CACHE_SIZE_SWEEP, hit_rates)
 
     # =========================================================================
     # GENERATE PLOTS
