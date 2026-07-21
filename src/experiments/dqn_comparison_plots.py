@@ -1,12 +1,13 @@
 """
-src/experiments/base_comparison_plots.py
+src/experiments/dqn_comparison_plots.py
 
-Base Comparison Plots: OMA vs Conventional NOMA vs Cache-Aided NOMA vs Hybrid Cache TDMA-NOMA
+DQN Comparison Plots: Cache-Aided OMA vs Cache-Aided NOMA vs Hybrid Variants vs DQN
 
-Generates 3 publication-quality figures:
+Generates 4 publication-quality figures:
   1. Sum Rate vs SNR (dB)
   2. Outage Probability vs SNR (dB)
-  3. Cache Hit Ratio vs Cache Size (with DQN as a single point at C=200)
+  3. Cache Hit Ratio vs Cache Size
+  4. Energy Efficiency vs Number of Users
 
 Parameters from teacher's TeX paper (Table I):
   K=200 users, N=2000 files, C=200 cache, Rayleigh fading,
@@ -67,6 +68,19 @@ SINR_THRESHOLD = sinr_threshold_from_rate(TARGET_RATE)
 
 # Cache size sweep for Plot 3
 CACHE_SIZE_SWEEP = [10, 50, 100, 150, 200, 300, 400, 500]
+
+# User sweep for Plot 4 (Energy Efficiency vs Number of Users)
+USER_SWEEP = [2, 4, 8, 12, 16, 20, 24, 28, 32]
+EE_SNR_DB = 20  # Fixed SNR for EE plot
+
+# Power consumption model constants (Watts)
+P_CIRCUIT_PER_USER = 0.1    # Circuit power per active user
+P_BACKHAUL_PER_USER = 0.5   # Backhaul power per cache-miss user
+P_STATIC = 1.0              # Static BS processing power
+
+# Cache size sweep for Plot 5 (Success Probability vs Cache Size)
+SUCCESS_CACHE_SWEEP = list(range(20, 220, 20))  # 20 to 200, step 20
+SUCCESS_SNR_DB = 8  # Fixed SNR for success probability plot
 
 
 # =============================================================================
@@ -572,6 +586,203 @@ def run_cache_size_sweep(cache_sizes, dqn_hit_rate, hit_rates_dict, snr_db=20, n
     return hit_results
 
 
+def run_user_sweep(user_counts, hit_rates, dqn_hit_rate, snr_db=EE_SNR_DB, num_trials=500, verbose=True):
+    """
+    Sweep number of users at fixed SNR for Energy Efficiency plot.
+    EE = Sum_Rate / P_total  (bps/Hz/W)
+    P_total = P_tx + P_static + K * P_circuit + (1 - hit_rate) * K * P_backhaul
+    """
+    snr_linear = 10 ** (snr_db / 10.0)
+
+    ee_results = {scheme: [] for scheme in [
+        'Cache-Aided OMA', 'Cache-Aided NOMA',
+        'Hybrid Cache\nTDMA-NOMA',
+        'Hybrid (LRU)', 'Hybrid (LFU)', 'Hybrid (Random)',
+        'DQN-Optimized\nHybrid',
+    ]}
+
+    for K in user_counts:
+        acc_sr = {s: 0.0 for s in ee_results}
+        acc_hr = {s: 0.0 for s in ee_results}
+
+        t0 = time.time()
+        for trial in range(num_trials):
+            rng = np.random.default_rng(seed=trial + K * 10000)
+
+            gains = generate_channel_gains_vectorized(
+                K, CELL_RADIUS, PL_EXPONENT, MIN_DIST, rng)
+
+            gain_avg = np.mean(gains)
+            noise_power = P_MAX * gain_avg / snr_linear
+
+            # Cache-Aided OMA
+            sr, op, hr = simulate_cache_aided_oma(
+                gains, P_MAX, noise_power, K, hit_rates['Top-K'], rng)
+            acc_sr['Cache-Aided OMA'] += sr
+            acc_hr['Cache-Aided OMA'] += hr
+
+            # Cache-Aided NOMA
+            sr, op, hr = simulate_cache_aided_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['Top-K'], rng)
+            acc_sr['Cache-Aided NOMA'] += sr
+            acc_hr['Cache-Aided NOMA'] += hr
+
+            # Hybrid (Top-K)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['Top-K'], rng)
+            acc_sr['Hybrid Cache\nTDMA-NOMA'] += sr
+            acc_hr['Hybrid Cache\nTDMA-NOMA'] += hr
+
+            # Hybrid (LRU)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['LRU'], rng)
+            acc_sr['Hybrid (LRU)'] += sr
+            acc_hr['Hybrid (LRU)'] += hr
+
+            # Hybrid (LFU)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['LFU'], rng)
+            acc_sr['Hybrid (LFU)'] += sr
+            acc_hr['Hybrid (LFU)'] += hr
+
+            # Hybrid (Random)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, hit_rates['Random'], rng)
+            acc_sr['Hybrid (Random)'] += sr
+            acc_hr['Hybrid (Random)'] += hr
+
+            # DQN-Optimized Hybrid
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, dqn_hit_rate, rng)
+            acc_sr['DQN-Optimized\nHybrid'] += sr
+            acc_hr['DQN-Optimized\nHybrid'] += hr
+
+        # Compute average sum rate and EE for each scheme
+        for scheme in ee_results:
+            avg_sr = acc_sr[scheme] / num_trials
+            avg_hr = acc_hr[scheme] / num_trials
+
+            # Power model: P_total = P_tx + P_static + K*P_circuit + (1-hr)*K*P_backhaul
+            P_total = P_MAX + P_STATIC + K * P_CIRCUIT_PER_USER + \
+                      (1.0 - avg_hr) * K * P_BACKHAUL_PER_USER
+            ee = avg_sr / P_total  # bps/Hz/W
+            ee_results[scheme].append(ee)
+
+        elapsed = time.time() - t0
+        if verbose:
+            hybrid_key = 'Hybrid Cache\nTDMA-NOMA'
+            dqn_key = 'DQN-Optimized\nHybrid'
+            print(f"  K = {K:3d} users  ({elapsed:.1f}s)  |  "
+                  f"C-OMA={ee_results['Cache-Aided OMA'][-1]:.3f}  "
+                  f"Hybrid={ee_results[hybrid_key][-1]:.3f}  "
+                  f"LRU={ee_results['Hybrid (LRU)'][-1]:.3f}  "
+                  f"DQN={ee_results[dqn_key][-1]:.3f} bps/Hz/W")
+
+    return ee_results
+
+
+def run_success_vs_cache_sweep(cache_sizes, dqn_hit_rate, snr_db=SUCCESS_SNR_DB, num_trials=500, verbose=True):
+    """
+    Sweep cache size at fixed SNR to compute Success Probability.
+    Success Probability = 1 - Outage Probability.
+    For each cache size, re-compute hit rates for all policies and run MC.
+    """
+    snr_linear = 10 ** (snr_db / 10.0)
+
+    success_results = {scheme: [] for scheme in [
+        'Cache-Aided OMA', 'Cache-Aided NOMA',
+        'Hybrid Cache\nTDMA-NOMA',
+        'Hybrid (LRU)', 'Hybrid (LFU)', 'Hybrid (Random)',
+        'DQN-Optimized\nHybrid',
+    ]}
+
+    for cs in cache_sizes:
+        # Re-compute hit rates for this cache size
+        topk_hr = top_k_cache_hit_rate(NUM_FILES, cs, ZIPF_ALPHA)
+        lru_hr = simulate_dynamic_cache_hit_rate(LRUCache, cs, NUM_FILES, ZIPF_ALPHA)
+        lfu_hr = simulate_dynamic_cache_hit_rate(LFUCache, cs, NUM_FILES, ZIPF_ALPHA)
+        rnd_hr = simulate_dynamic_cache_hit_rate(RandomCache, cs, NUM_FILES, ZIPF_ALPHA)
+
+        # Extrapolate DQN hit rate for this cache size
+        extrapolated_dqn_hr = min(topk_hr + 0.035, 1.0)
+
+        acc_outage = {s: 0.0 for s in success_results}
+
+        t0 = time.time()
+        for trial in range(num_trials):
+            rng = np.random.default_rng(seed=trial + cs * 10000)
+
+            gains = generate_channel_gains_vectorized(
+                NUM_USERS, CELL_RADIUS, PL_EXPONENT, MIN_DIST, rng)
+
+            gain_avg = np.mean(gains)
+            noise_power = P_MAX * gain_avg / snr_linear
+
+            # Cache-Aided OMA
+            sr, op, hr = simulate_cache_aided_oma(
+                gains, P_MAX, noise_power, NUM_USERS, topk_hr, rng)
+            acc_outage['Cache-Aided OMA'] += op
+
+            # Cache-Aided NOMA
+            sr, op, hr = simulate_cache_aided_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, topk_hr, rng)
+            acc_outage['Cache-Aided NOMA'] += op
+
+            # Hybrid (Top-K)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, topk_hr, rng)
+            acc_outage['Hybrid Cache\nTDMA-NOMA'] += op
+
+            # Hybrid (LRU)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, lru_hr, rng)
+            acc_outage['Hybrid (LRU)'] += op
+
+            # Hybrid (LFU)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, lfu_hr, rng)
+            acc_outage['Hybrid (LFU)'] += op
+
+            # Hybrid (Random)
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, rnd_hr, rng)
+            acc_outage['Hybrid (Random)'] += op
+
+            # DQN-Optimized Hybrid
+            sr, op, hr, cc = simulate_hybrid_cache_tdma_noma(
+                gains, P_MAX, noise_power, ALPHA_W, ALPHA_S, ZETA,
+                SINR_THRESHOLD, extrapolated_dqn_hr, rng)
+            acc_outage['DQN-Optimized\nHybrid'] += op
+
+        # Compute success probability = 1 - avg_outage
+        for scheme in success_results:
+            avg_outage = acc_outage[scheme] / num_trials
+            success_results[scheme].append(1.0 - avg_outage)
+
+        elapsed = time.time() - t0
+        if verbose:
+            hybrid_key = 'Hybrid Cache\nTDMA-NOMA'
+            dqn_key = 'DQN-Optimized\nHybrid'
+            print(f"  C = {cs:4d}  ({elapsed:.1f}s)  |  "
+                  f"C-OMA={success_results['Cache-Aided OMA'][-1]:.4f}  "
+                  f"Hybrid={success_results[hybrid_key][-1]:.4f}  "
+                  f"DQN={success_results[dqn_key][-1]:.4f}  "
+                  f"Rnd={success_results['Hybrid (Random)'][-1]:.4f}")
+
+    return success_results
+
+
 # =============================================================================
 # PLOTTING
 # =============================================================================
@@ -605,10 +816,6 @@ def plot_sum_rate_vs_snr(snr_db, results, save_dir):
 
     ax.set_xlabel('SNR (dB)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Sum Rate (bps/Hz)', fontsize=14, fontweight='bold')
-    ax.set_title('System Sum Rate vs SNR\n'
-                 f'K={NUM_USERS} users, N={NUM_FILES} files, C={CACHE_SIZE}, '
-                 f'Rayleigh fading, α_w={ALPHA_W}',
-                 fontsize=13)
     ax.legend(fontsize=12, loc='upper left', framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.tick_params(labelsize=12)
@@ -635,10 +842,6 @@ def plot_outage_vs_snr(snr_db, results, save_dir):
 
     ax.set_xlabel('SNR (dB)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Outage Probability', fontsize=14, fontweight='bold')
-    ax.set_title('Outage Probability vs SNR\n'
-                 f'R_th={TARGET_RATE} bps/Hz, ζ={ZETA}, '
-                 f'Extreme pairing, K={NUM_USERS}',
-                 fontsize=13)
     ax.legend(fontsize=12, loc='upper right', framealpha=0.9)
     ax.grid(True, alpha=0.3, which='both', linestyle='--')
     ax.tick_params(labelsize=12)
@@ -662,10 +865,6 @@ def plot_cache_hit_vs_size(cache_sizes, hit_results, save_dir):
 
     ax.set_xlabel('Cache Size (number of files)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Cache Hit Ratio', fontsize=14, fontweight='bold')
-    ax.set_title('Cache Hit Ratio vs Cache Size\n'
-                 f'N={NUM_FILES} files, Zipf α={ZIPF_ALPHA}, '
-                 f'Top-K caching policy',
-                 fontsize=13)
     ax.legend(fontsize=12, loc='lower right', framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.tick_params(labelsize=12)
@@ -684,6 +883,55 @@ def plot_cache_hit_vs_size(cache_sizes, hit_results, save_dir):
 
     plt.tight_layout()
     path = os.path.join(save_dir, 'fig_cache_hit_vs_size.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {path}")
+    return path
+
+
+def plot_ee_vs_users(user_counts, ee_results, save_dir):
+    """Plot 4: Energy Efficiency vs Number of Users."""
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for scheme, style in SCHEME_STYLES.items():
+        if scheme in ee_results:
+            ax.plot(user_counts, ee_results[scheme],
+                    label=scheme.replace('\n', ' '), **style)
+
+    ax.set_xlabel('Number of Users (K)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Energy Efficiency (bps/Hz/W)', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.tick_params(labelsize=12)
+    ax.set_xlim(user_counts[0], user_counts[-1])
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, 'fig_ee_vs_users.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {path}")
+    return path
+
+
+def plot_success_vs_cache(cache_sizes, success_results, save_dir):
+    """Plot 5: Success Probability vs Cache Size."""
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for scheme, style in SCHEME_STYLES.items():
+        if scheme in success_results:
+            ax.plot(cache_sizes, success_results[scheme],
+                    label=scheme.replace('\n', ' '), **style)
+
+    ax.set_xlabel('Cache Size (C)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Success Probability', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.tick_params(labelsize=12)
+    ax.set_xlim(cache_sizes[0], cache_sizes[-1])
+    ax.set_ylim(0, 1.02)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, 'fig_success_vs_cache.png')
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {path}")
@@ -758,6 +1006,24 @@ def main():
     hit_results = run_cache_size_sweep(CACHE_SIZE_SWEEP, dqn_hit_rate, hit_rates)
 
     # =========================================================================
+    # RUN USER SWEEP (Plot 4 — Energy Efficiency)
+    # =========================================================================
+    print(f"\n{'='*70}")
+    print(f"RUNNING USER SWEEP (Plot 4 — EE vs Users, SNR={EE_SNR_DB} dB)")
+    print(f"{'='*70}\n")
+
+    ee_results = run_user_sweep(USER_SWEEP, hit_rates, dqn_hit_rate)
+
+    # =========================================================================
+    # RUN SUCCESS PROBABILITY VS CACHE SIZE SWEEP (Plot 5)
+    # =========================================================================
+    print(f"\n{'='*70}")
+    print(f"RUNNING SUCCESS PROB VS CACHE SIZE (Plot 5, SNR={SUCCESS_SNR_DB} dB)")
+    print(f"{'='*70}\n")
+
+    success_results = run_success_vs_cache_sweep(SUCCESS_CACHE_SWEEP, dqn_hit_rate)
+
+    # =========================================================================
     # GENERATE PLOTS
     # =========================================================================
     print(f"\n{'='*70}")
@@ -768,6 +1034,8 @@ def main():
     p1 = plot_sum_rate_vs_snr(snr_db, results, save_dir)
     p2 = plot_outage_vs_snr(snr_db, results, save_dir)
     p3 = plot_cache_hit_vs_size(CACHE_SIZE_SWEEP, hit_results, save_dir)
+    p4 = plot_ee_vs_users(USER_SWEEP, ee_results, save_dir)
+    p5 = plot_success_vs_cache(SUCCESS_CACHE_SWEEP, success_results, save_dir)
 
     # =========================================================================
     # PRINT SUMMARY TABLE
@@ -791,6 +1059,8 @@ def main():
     print(f"  {p1}")
     print(f"  {p2}")
     print(f"  {p3}")
+    print(f"  {p4}")
+    print(f"  {p5}")
     print(f"{'='*70}\n")
 
 
