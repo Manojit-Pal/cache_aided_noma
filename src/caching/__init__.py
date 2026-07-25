@@ -37,6 +37,13 @@ try:
 except ImportError:
     HAS_DQN = False
 
+# Standard DQN (vanilla baseline for comparison)
+try:
+    from .standard_dqn import StandardDQNCache
+    HAS_STANDARD_DQN = True
+except ImportError:
+    HAS_STANDARD_DQN = False
+
 # Define what's available when using "from caching import *"
 __all__ = [
     # Base class
@@ -61,6 +68,8 @@ __all__ = [
 # Add DQN if available
 if HAS_DQN:
     __all__.append('DQNCache')
+if HAS_STANDARD_DQN:
+    __all__.append('StandardDQNCache')
 
 
 def create_cache(policy: str, capacity: int, **kwargs):

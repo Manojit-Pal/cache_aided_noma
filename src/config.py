@@ -2,18 +2,6 @@
 src/config.py
 
 Simulation configuration parameters for Cache-Aided NOMA with DQN.
-
-Bug Fixes Applied (2026):
-  BUG-5        : RL_STEPS_PER_EPISODE / RL_TRAINING_STEPS / RL_EPSILON_DECAY_STEPS
-                 corrected after BUG-SIM-2 fix — actual steps/episode = 10,000
-  BUG-7        : RL_REWARD_CIC_ENABLED 7.0 → 2.0 (prevents perverse incentive)
-  BUG-8        : Added set_debug_config() small-scale preset
-  BUG-CONFIG-1 : set_quick_test_config() step counts corrected
-  BUG-CONFIG-2 : set_full_experiment_config() step counts corrected
-  BUG-CONFIG-3 : RL_PRIORITY_BETA_FRAMES 100K → 20M (full training duration)
-  ROOT-1       : RL_REPLAY_BUFFER_SIZE 50K → 500K (was 20% overwritten/episode)
-  ROOT-2       : RL_WARM_UP_STEPS None(→1000) → 15,000 (1.5 full episodes)
-  ROOT-4       : RL_TRAIN_FREQUENCY 4 → 10 (reduce overfitting to recent data)
 """
 
 # Random seed for reproducibility
@@ -109,9 +97,9 @@ OUTAGE_SINR_MARGIN = 2.0
 # v2: binary action space → faster convergence → fewer episodes needed
 # Steps per episode = NUM_USERS * REQUESTS_PER_USER = 800
 # ------------------------------
-RL_TRAINING_EPISODES   = 500          # v2: was 2000 (converges faster)
+RL_TRAINING_EPISODES   = 800          
 RL_STEPS_PER_EPISODE   = 800          # NUM_USERS(16) x REQ_PER_USER(50)
-RL_TRAINING_STEPS      = 400_000      # 500 x 800
+RL_TRAINING_STEPS      = 6400_00      # 800 x 800
 
 # ------------------------------
 # Epsilon-Greedy Exploration
@@ -119,7 +107,7 @@ RL_TRAINING_STEPS      = 400_000      # 500 x 800
 # ------------------------------
 RL_EPSILON_START        = 1.0
 RL_EPSILON_END          = 0.01
-RL_EPSILON_DECAY_STEPS  = 200_000     # v2: 40% of total (was 50%)
+RL_EPSILON_DECAY_STEPS  = 3200_00     # v2: 50% of total
 RL_EVAL_EPSILON         = 0.0
 
 # ------------------------------
@@ -127,18 +115,18 @@ RL_EVAL_EPSILON         = 0.0
 # v2: smaller network for binary action + compact state
 # ------------------------------
 RL_USE_NEURAL_NETWORK = True
-RL_HIDDEN_DIMS = [64, 32]   # v2: was [128,128] (much simpler problem now)
+RL_HIDDEN_DIMS = [64, 32]   
 
 # ------------------------------
 # Learning Hyperparameters
 # v2: higher LR for faster convergence on simpler problem
 # ------------------------------
-RL_LEARNING_RATE      = 0.001    # v2: was 0.0001 (10x faster)
+RL_LEARNING_RATE      = 0.001    
 RL_GAMMA              = 0.99     # Discount factor
 RL_BATCH_SIZE         = 64
 
 # v2: smaller buffer needed (simpler transitions, faster convergence)
-RL_REPLAY_BUFFER_SIZE = 10_000   # v2: ~12.5x steps_per_ep
+RL_REPLAY_BUFFER_SIZE = 10_0000   
 
 # ------------------------------
 # Training Stability
